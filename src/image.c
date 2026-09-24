@@ -32,7 +32,9 @@ int Image_Load(image_t *img, const char *path)
     if (GdiplusStartup(&token, &gi, NULL) != Ok)
         return -1;
 
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH) <= 0) {
+    /* Path comes from Win32 A-APIs (DragQueryFileA / GetOpenFileNameA / CLI),
+       which use the system ANSI codepage — NOT UTF-8. CP_ACP keeps CJK paths intact. */
+    if (MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH) <= 0) {
         GdiplusShutdown(token);
         return -1;
     }
