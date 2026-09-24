@@ -232,7 +232,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                       (int)ip.x, (int)ip.y, px[ip.x * 4 + 2], px[ip.x * 4 + 1], px[ip.x * 4 + 0]);
             m[sizeof(m) - 1] = '\0';
         }
-        if (ROI_OnMove(&g_roi, &g_view, &g_img, p)) InvalidateRect(hwnd, NULL, FALSE);
+        if (ROI_OnMove(&g_roi, &g_view, &g_img, p)) {
+            /* Full-client repaint without erase: mem-DC double buffer +
+               WM_ERASEBKGND skip means no flicker, and the old box
+               pixels are always restored. Per-region invalidation left
+               ghost corners (verified on-screen), so keep it simple. */
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
         UpdateStatus(m[0] ? m : NULL);
         return 0;
     }
