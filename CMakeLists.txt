@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.10)
+project(roi_analyzer C)
+set(CMAKE_C_STANDARD 11)
+add_compile_options(-Wall -Wextra)
+add_executable(roi_analyzer src/main.c src/image.c src/view.c src/roi.c src/analyze.c src/log.c)
+target_link_libraries(roi_analyzer -luser32 -lgdi32 -lkernel32 -lcomctl32 -lcomdlg32 -lgdiplus -lshell32 -lm)
+set_target_properties(roi_analyzer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin LINK_FLAGS "-mwindows")

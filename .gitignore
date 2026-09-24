@@ -1,0 +1,5 @@
+build/
+bin/*.exe
+bin/*.log
+bin/roi_log.csv
+bin/roi_log.txt
