@@ -1,6 +1,14 @@
 # ROI Analyzer — 系统架构设计书
 
-> 版本 v1.0 | 2026-09-24 | 新项目(独立于 c-vlcplayer,但复用其坐标/Lab 公式)
+> 版本 v1.1 | 2026-09-24 | 新增:居中半屏默认窗口、resize 跟随、Log 打开文件菜单
+
+变更历史:
+- v1.1 (2026-09-24): 默认窗口改为居中半屏(`GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)`,x=w/4,y=h/4,w/2×h/2);
+  图片 + ROI(确认/预览/橡皮筋)跟随窗口 resize(橡皮筋改存影像坐标,overlay 每 paint 经当前 view 换算;
+  `WM_SIZE` 补 `InvalidateRect`,mem-DC 改画 (0,0) 原点,去掉可疑 `pv.off_y -= rc.top`);
+  Log 菜单新增「Open Log File」(打开当前图片的 per-image log,缺文件时 MessageBox 提示先确认 ROI);
+  状态栏空闲提示注明每次确认自动追加当前图片 log。
+- v1.0 (2026-09-24): 新项目(独立于 c-vlcplayer,但复用其坐标/Lab 公式)
 
 ## 1. 目标
 
@@ -8,7 +16,7 @@
 
 - 拖入图档(PNG / JPG / BMP)显示
 - ROI 框选:鼠标拖曳矩形,或固定 3x3 / 5x5 点选
-- 输出每块 ROI 的 RGB mean/std、Y mean/std、Lab mean → 写 log(CSV + TXT)
+- 输出每块 ROI 的 RGB mean/std、Y mean/std、Lab mean → 追加到当前图片的 `.log`
 
 非目标:不做视频、不做 RTSP、不做 LDC、不做直方图窗口、不做 Macbeth 比对。
 
@@ -23,8 +31,8 @@ roi-analyzer/
 │   ├── view.h/.c     # fit-to-window 参数、窗口↔影像坐标换算
 │   ├── roi.h/.c      # 鼠标状态机、ROI overlay 绘制
 │   ├── analyze.h/.c  # mean/std + Lab 计算
-│   └── log.h/.c      # CSV + TXT log 输出
-├── bin/              # 输出 exe + roi_log.csv / roi_log.txt
+│   └── log.h/.c      # per-image append-only log 输出
+├── bin/              # 输出 exe
 ├── build/            # CMake build 目录(不进版控)
 └── docs/
     ├── 01_architecture.md  # 本文件
@@ -83,7 +91,7 @@ typedef struct {
 | view | `View_Update()`, `View_ToImage()`, `View_ToWindow()` | fit 缩放:`scale = min(cw/iw, ch/ih)`,居中;坐标换算后 clamp 到 `[0, w-1]` |
 | roi | `ROI_OnLDown/Move/LUp()`, `ROI_DrawOverlay()` | 见 §5 状态机 |
 | analyze | `AnalyzeROI(img, rect, out)` | 单 pass:sum + sumsq → mean、总体 std;Y 用 BT.601;Lab 用 D65(与 c-vlcplayer 同一公式) |
-| log | `LogROI(img_path, mode, result)` | append CSV 一列 + TXT 一段(见 §7) |
+| log | `LogROI(img_path, mode, result)`, `Log_GetPath()` | 追加源图片目录的 `<basename>_<mode>.log`(见 §7) |
 
 ## 5. 交互状态机
 
@@ -108,32 +116,39 @@ MODE_FIX3 / MODE_FIX5:
 
 ## 7. Log 格式
 
-`bin/roi_log.csv`(表头 + append):
+每个源图片和模式各有一个 append-only 日志，位于源图片所在目录。文件名为去掉最后扩展名后的
+`<image basename>_3x3.log`、`<image basename>_5x5.log` 或 `<image basename>_drag.log`，例如 `C:/data/test_red.png` → `C:/data/test_red_3x3.log`。
+每条记录必须以清晰的 `# roi rect` 行开始:
 
 ```
-timestamp,image,mode,x0,y0,x1,y1,count,R_mean,R_std,G_mean,G_std,B_mean,B_std,Y_mean,Y_std,L_mean,a_mean,b_mean
-2026-09-08_10-00-01,test_red.png,drag,10,10,59,59,2500,255.00,0.00,0.00,0.00,0.00,0.00,76.24,0.00,53.24,80.11,67.22
+# roi rect=(10,10)-(59,59) count=2500 mode=drag [2026-09-24 10:00:01]
+RGB mean=(255.00,0.00,0.00) std=(0.00,0.00,0.00)
+Y mean=76.24 std=0.00
+Lab L=53.24 a=80.11 b=67.22
 ```
 
-`bin/roi_log.txt`(人类可读,每块一段):
+mode 字段值:`drag` / `3x3` / `5x5`。
+
+## 8. UI 版面(默认居中半屏,跟随 resize)
+
+默认窗口:主屏居中半屏(`x=screenW/4, y=screenH/4, w=screenW/2, h=screenH/2`,
+`GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)`),不再是 `CW_USEDEFAULT` + 1280×800。
 
 ```
-[2026-09-08 10:00:01] test_red.png mode=drag rect=(10,10)-(59,59) count=2500
-  R: mean=255.00 std=0.00   G: mean=0.00 std=0.00   B: mean=0.00 std=0.00
-  Y: mean=76.24 std=0.00
-  Lab: L=53.24 a=80.11 b=67.22
-```
-
-mode 字段值:`drag` / `fix3` / `fix5`。
-
-## 8. UI 版面(单一窗口 1280×800)
-
-```
-菜单: File(Open.../Exit)  Mode(Drag[1]/3x3[2]/5x5[3])  Log(Open Folder/Clear)
+菜单: File(Open.../Exit)  Mode(Drag[1]/3x3[2]/5x5[3])  Log(Open Log File/Open Folder/Clear)
 画布: 影像居中 fit,ROI 确认框=黄色,固定模式预览框=白色,拖曳中=白色橡皮筋
 标题栏: 档名 + 尺寸 + 模式
-底部状态栏: 鼠标影像坐标 + 最后一笔 ROI 摘要(R/G/B/Y mean)
+底部状态栏: 鼠标影像坐标 + 最后一笔 ROI 摘要(R/G/B/Y mean);空闲时提示每次确认自动追加当前图片 log
 ```
+
+resize 跟随:`WM_SIZE → RefreshView → View_Update` 重算 fit 参数并 `InvalidateRect` 立即重绘;
+`WM_PAINT` 的 mem-DC 以 (0,0)-(w,h) 为原点(含状态栏扣除),`g_view` 直接使用(无 `off_y` 修正)。
+ROI 全部存影像坐标:确认框/预览中心本就如此,橡皮筋(anchor/rubber)也改存影像坐标,
+overlay 每次 paint 经当前 view 换算 → 图片缩放时三者同步缩放。
+
+Log 说明:每次 ROI 确认自动 append 当前图片、当前模式的 `<basename>_<mode>.log`;
+「Open Log File」直接打开当前图片 log(无当前图片或尚无文件时 MessageBox);
+「Clear」只删除当前图片 log 并清除 ROI 状态;Open Folder 行为不变。
 
 无 Timer、无线程:图片静态,分析在 UI 线程同步执行(<100ms,无卡顿问题)。
 

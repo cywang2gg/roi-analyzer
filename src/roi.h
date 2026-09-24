@@ -13,8 +13,9 @@ typedef enum { MODE_DRAG, MODE_FIX3, MODE_FIX5 } roi_mode_t;
 typedef struct {
     roi_mode_t mode;
     BOOL dragging;      // rubber-banding (MODE_DRAG only)
-    POINT anchor;       // drag start (window coords)
-    RECT rubber;        // rubber band (window coords)
+    POINT anchor;       // drag start (IMAGE coords, converted at LDown)
+    RECT rubber;        // rubber band (IMAGE coords inclusive: left/top = anchor,
+                        // right/bottom = current; normalized at draw time)
     RECT confirmed;     // confirmed box, IMAGE coords inclusive: left=x0 top=y0 right=x1 bottom=y1
     BOOL has_confirmed;
     POINT preview;      // fixed-mode preview center (image coords)
@@ -23,7 +24,7 @@ typedef struct {
 
 void ROI_Init(roi_state_t *s);
 void ROI_Clear(roi_state_t *s); // forget confirmed + preview + dragging
-const char *ROI_ModeStr(roi_mode_t m);   // "drag" / "fix3" / "fix5" (log)
+const char *ROI_ModeStr(roi_mode_t m);   // "drag" / "3x3" / "5x5" (log)
 const char *ROI_ModeTitle(roi_mode_t m); // "Drag" / "3x3" / "5x5" (title bar)
 int ROI_FixRadius(roi_mode_t m);         // 0 for DRAG, 1 for FIX3, 2 for FIX5
 

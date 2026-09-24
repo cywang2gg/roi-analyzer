@@ -28,9 +28,9 @@ const char *ROI_ModeStr(roi_mode_t m)
 {
     switch (m) {
     case MODE_FIX3:
-        return "fix3";
+        return "3x3";
     case MODE_FIX5:
-        return "fix5";
+        return "5x5";
     case MODE_DRAG:
     default:
         return "drag";
@@ -86,10 +86,12 @@ BOOL ROI_OnLDown(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, 
         return FALSE; /* pressed outside the image: ignore */
 
     if (s->mode == MODE_DRAG) {
+        /* ip already converted above; store in IMAGE coords so the rubber
+           band follows window resizes (overlay reconverts per paint). */
         s->dragging = TRUE;
-        s->anchor = wp;
-        s->rubber.left = s->rubber.right = wp.x;
-        s->rubber.top = s->rubber.bottom = wp.y;
+        s->anchor = ip;
+        s->rubber.left = s->rubber.right = ip.x;
+        s->rubber.top = s->rubber.bottom = ip.y;
         s->has_preview = FALSE;
         return FALSE; /* confirm on LUp */
     }
@@ -127,8 +129,19 @@ BOOL ROI_OnMove(roi_state_t *s, const view_t *v, const image_t *img, POINT wp)
     if (s->mode == MODE_DRAG) {
         if (!s->dragging)
             return FALSE;
-        s->rubber.right = wp.x;
-        s->rubber.bottom = wp.y;
+        /* Convert to image coords so the rubber band survives resizes;
+           clamp at the edges (mirror ROI_OnLUp) for live feedback. */
+        if (!View_ToImage(v, img->w, img->h, wp, &ip)) {
+            ip.x = wp.x - v->off_x;
+            ip.y = wp.y - v->off_y;
+            ip.x = v->scale > 0.0f ? (int)((float)ip.x / v->scale) : 0;
+            ip.y = v->scale > 0.0f ? (int)((float)ip.y / v->scale) : 0;
+            clamp_pt(&ip, img->w, img->h);
+        }
+        if (ip.x == s->rubber.right && ip.y == s->rubber.bottom)
+            return FALSE; /* same cell: no repaint, no flicker */
+        s->rubber.right = ip.x;
+        s->rubber.bottom = ip.y;
         return TRUE;
     }
 
@@ -143,6 +156,8 @@ BOOL ROI_OnMove(roi_state_t *s, const view_t *v, const image_t *img, POINT wp)
         ip.x = img->w - 1 - r;
     if (ip.y > img->h - 1 - r)
         ip.y = img->h - 1 - r;
+    if (s->has_preview && ip.x == s->preview.x && ip.y == s->preview.y)
+        return FALSE; /* same cell: no repaint, no flicker */
     s->preview = ip;
     s->has_preview = TRUE;
     return TRUE;
@@ -157,19 +172,15 @@ BOOL ROI_OnLUp(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, RE
     if (s->mode != MODE_DRAG || !s->dragging)
         return FALSE;
     s->dragging = FALSE;
+    (void)v;
+    (void)wp;
 
-    /* Anchor was inside the image at LDown; clamp defensively anyway. */
-    if (!View_ToImage(v, img->w, img->h, s->anchor, &a))
-        return FALSE;
-    if (!View_ToImage(v, img->w, img->h, wp, &b)) {
-        /* Released outside: clamp the raw window point into the image. */
-        b.x = wp.x - v->off_x;
-        b.y = wp.y - v->off_y;
-        b.x = (int)((float)b.x / v->scale);
-        b.y = (int)((float)b.y / v->scale);
-        clamp_pt(&b, img->w, img->h);
-    }
+    /* Anchor/rubber are stored in IMAGE coords: normalize + clamp. */
+    a = s->anchor;
+    b.x = s->rubber.right;
+    b.y = s->rubber.bottom;
     clamp_pt(&a, img->w, img->h);
+    clamp_pt(&b, img->w, img->h);
 
     s->confirmed.left = (a.x < b.x) ? a.x : b.x;
     s->confirmed.top = (a.y < b.y) ? a.y : b.y;
@@ -239,10 +250,14 @@ void ROI_DrawOverlay(HDC hdc, const view_t *v, const roi_state_t *s)
     }
 
     if (s->dragging) {
-        wr.left = (s->anchor.x < s->rubber.right) ? s->anchor.x : s->rubber.right;
-        wr.top = (s->anchor.y < s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
-        wr.right = (s->anchor.x > s->rubber.right) ? s->anchor.x : s->rubber.right;
-        wr.bottom = (s->anchor.y > s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
+        /* Rubber band is IMAGE coords: reconvert via the current view so
+           it tracks window resizes like the confirmed box. */
+        RECT img_rc;
+        img_rc.left = (s->anchor.x < s->rubber.right) ? s->anchor.x : s->rubber.right;
+        img_rc.top = (s->anchor.y < s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
+        img_rc.right = (s->anchor.x > s->rubber.right) ? s->anchor.x : s->rubber.right;
+        img_rc.bottom = (s->anchor.y > s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
+        img_rect_to_window(v, img_rc, &wr);
         draw_rect_outline(hdc, &wr, RGB(255, 255, 255)); /* rubber band: white */
     }
 }

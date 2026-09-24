@@ -19,6 +19,7 @@
 #define IDM_FIX5   113
 #define IDM_FOLDER 121
 #define IDM_CLEAR  122
+#define IDM_OPENLOG 123
 
 static HWND g_hwnd, g_status;
 static image_t g_img;
@@ -60,7 +61,7 @@ static void UpdateStatus(const char *mouse) {
                   ROI_ModeStr(g_roi.mode), g_last.x0, g_last.y0, g_last.x1, g_last.y1,
                   g_last.count);
     else
-        _snprintf(s, sizeof(s), "%s", mouse ? mouse : "drop PNG/JPG/BMP here | 1=Drag 2=3x3 3=5x5 C=clear O=open");
+        _snprintf(s, sizeof(s), "%s", mouse ? mouse : "drop PNG/JPG/BMP here | 1=Drag 2=3x3 3=5x5 C=clear O=open | confirm appends the image log");
     s[sizeof(s) - 1] = '\0';
     SendMessageA(g_status, SB_SETTEXTA, 0, (LPARAM)s);
 }
@@ -82,11 +83,16 @@ static void SetMode(roi_mode_t m) {
     g_roi.mode = m;
     g_roi.dragging = FALSE;
     g_roi.has_preview = FALSE;
+    if (m != MODE_DRAG && g_img.valid) {
+        g_roi.preview.x = g_img.w / 2;
+        g_roi.preview.y = g_img.h / 2;
+        g_roi.has_preview = TRUE;
+    }
     CheckMenuItem(GetMenu(g_hwnd), IDM_DRAG, MF_BYCOMMAND | (m == MODE_DRAG ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(GetMenu(g_hwnd), IDM_FIX3, MF_BYCOMMAND | (m == MODE_FIX3 ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(GetMenu(g_hwnd), IDM_FIX5, MF_BYCOMMAND | (m == MODE_FIX5 ? MF_CHECKED : MF_UNCHECKED));
     UpdateTitle();
-    InvalidateRect(g_hwnd, NULL, TRUE);
+    InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 // Analyze + log one image-coord rect; updates status/title/paint.
@@ -95,10 +101,10 @@ static void ConfirmROI(RECT img_rc) {
     if (g_last.count <= 0) return;
     g_has_last = TRUE;
     if (LogROI(g_img.path, ROI_ModeStr(g_roi.mode), &g_last) != 0)
-        MessageBoxA(g_hwnd, "Failed to write roi_log.csv/txt", "Log", MB_OK | MB_ICONWARNING);
+        MessageBoxA(g_hwnd, "Failed to write the current image log.", "Log", MB_OK | MB_ICONWARNING);
     UpdateStatus(NULL);
     UpdateTitle();
-    InvalidateRect(g_hwnd, NULL, TRUE);
+    InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 static void OpenImageFile(const char *path) {
@@ -141,6 +147,21 @@ static void OpenLogFolder(void) {
     ShellExecuteA(NULL, "open", mod[0] ? mod : ".", NULL, NULL, SW_SHOWNORMAL);
 }
 
+// Log menu: open the current image's auto-written log directly.
+static void OpenLogFile(void) {
+    char path[MAX_PATH] = { 0 };
+    if (g_img.valid)
+        Log_GetPath(g_img.path, ROI_ModeStr(g_roi.mode), path, sizeof(path));
+    if (path[0] && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+        ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
+        return;
+    }
+    MessageBoxA(g_hwnd,
+                g_img.valid ? "The current image has no log yet.\nConfirm an ROI first."
+                            : "No current image.\nOpen an image and confirm an ROI first.",
+                "Log", MB_OK | MB_ICONINFORMATION);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -155,6 +176,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_status) SendMessage(g_status, WM_SIZE, 0, 0);
         RefreshView();
         UpdateStatus(NULL);
+        InvalidateRect(hwnd, NULL, TRUE);
         return 0;
     case WM_COMMAND: {
         int id = LOWORD(wp);
@@ -164,8 +186,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (id == IDM_FIX3) SetMode(MODE_FIX3);
         else if (id == IDM_FIX5) SetMode(MODE_FIX5);
         else if (id == IDM_FOLDER) OpenLogFolder();
+        else if (id == IDM_OPENLOG) OpenLogFile();
         else if (id == IDM_CLEAR) {
-            Log_Clear();
+            if (g_img.valid)
+                Log_Clear(g_img.path, ROI_ModeStr(g_roi.mode));
             ROI_Clear(&g_roi);
             g_has_last = FALSE;
             UpdateStatus("log cleared");
@@ -228,6 +252,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DragFinish(hd);
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1; /* we paint the full client area from the mem-DC; skip erase to avoid flicker */
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -236,21 +262,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int sh = 0;
         if (g_status) { RECT sr; GetWindowRect(g_status, &sr); sh = sr.bottom - sr.top; }
         rc.bottom -= sh;
+        // Paint area: (0,0)-(w,h) in window coords, excludes status bar.
+        int pw = rc.right - rc.left;
+        int ph = rc.bottom - rc.top;
         FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
         HDC mem = CreateCompatibleDC(hdc);
-        HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right > 0 ? rc.right : 1,
-                                             (rc.bottom - rc.top) > 0 ? (rc.bottom - rc.top) : 1);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, pw > 0 ? pw : 1, ph > 0 ? ph : 1);
         HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
-        FillRect(mem, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        RECT mem_rc;
+        mem_rc.left = 0; mem_rc.top = 0; mem_rc.right = pw; mem_rc.bottom = ph;
+        FillRect(mem, &mem_rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
         if (g_img.valid) {
-            view_t pv = g_view;
-            pv.off_y -= rc.top; // paint into top-left-origin memdc
-            // recompute offsets relative to paint area
-            View_DrawImage(mem, &pv, &g_img);
-            ROI_DrawOverlay(mem, &pv, &g_roi);
+            // g_view offsets are relative to this same (0,0)-(w,h) origin,
+            // so no off_y correction is needed: draw + overlay convert
+            // image coords -> window coords via the current view directly.
+            View_DrawImage(mem, &g_view, &g_img);
+            ROI_DrawOverlay(mem, &g_view, &g_roi);
         }
-        BitBlt(hdc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
-               mem, 0, 0, SRCCOPY);
+        BitBlt(hdc, rc.left, rc.top, pw, ph, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old);
         DeleteObject(bmp);
         DeleteDC(mem);
@@ -295,15 +324,23 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     AppendMenuA(mode, MF_STRING, IDM_FIX3, "3x3\t2");
     AppendMenuA(mode, MF_STRING, IDM_FIX5, "5x5\t3");
     HMENU logm = CreatePopupMenu();
+    AppendMenuA(logm, MF_STRING, IDM_OPENLOG, "Open Log File");
     AppendMenuA(logm, MF_STRING, IDM_FOLDER, "Open Folder");
     AppendMenuA(logm, MF_STRING, IDM_CLEAR, "Clear");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "File");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mode, "Mode");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)logm, "Log");
 
+    // Centered half-screen default (primary monitor): x=w/4, y=h/4, w/2 x h/2.
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sy = GetSystemMetrics(SM_CYSCREEN);
+    int ww = (sw > 0) ? sw / 2 : 1280;
+    int wh = (sy > 0) ? sy / 2 : 800;
+    int wx = (sw > 0) ? sw / 4 : CW_USEDEFAULT;
+    int wy = (sy > 0) ? sy / 4 : CW_USEDEFAULT;
     g_hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, "RoiAnalyzerWnd", "ROI Analyzer",
-                             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                             1280, 800, NULL, bar, hi, NULL);
+                             WS_OVERLAPPEDWINDOW, wx, wy,
+                             ww, wh, NULL, bar, hi, NULL);
     ShowWindow(g_hwnd, show);
     UpdateWindow(g_hwnd);
     UpdateTitle();

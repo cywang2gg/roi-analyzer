@@ -13,7 +13,7 @@
 | V5 | RGB mean/std 正确 | 纯色 + 渐变测试图 | 纯色 std=0,渐变 mean/std 与 Python 参考值一致(容差 0.01) |
 | V6 | Y mean/std 正确 | 同上 | `Y=0.299R+0.587G+0.114B`,与参考值一致(容差 0.01) |
 | V7 | Lab 正确 | 标准色块 | 与 c-vlcplayer `rgb_to_lab` 同输入同输出(容差 0.05);白场 L≈100、a/b≈0,黑场 L≈0 |
-| V8 | log 格式正确 | 检查 CSV/TXT | 表头 19 列,数值保留 2 位小数,append 不覆盖旧行 |
+| V8 | per-image/mode log 格式正确 | 检查源目录 `<image>_<mode>.log` | `# roi rect` 开头,RGB/Y/Lab 数值保留 2 位小数,同图同模式 append 不覆盖旧记录 |
 | V9 | 越界/空图鲁棒性 | 边界点击、无图操作 | 不崩溃、无 log 写入、状态栏提示 |
 
 ## 2. 测试图生成(Python 参考实现)
@@ -75,18 +75,18 @@ def ref_stats(path, x0, y0, x1, y1):
                 b=(m(bs),std(b2,bs)), y=(m(ys),std(y2,ys)))
 ```
 
-流程:C 程序框选 → 读 `roi_log.csv` 最后一行 → 与 `ref_stats` 同区域输出对比,容差 0.01。
+流程:C 程序框选 → 读源目录当前图片、当前模式的 `<image>_<mode>.log` 最后一条记录 → 与 `ref_stats` 同区域输出对比,容差 0.01。
 
 ## 4. 验证步骤(手动清单)
 
 1. 构建:`cmake --build build`,确认 0 warning,exe 存在。
 2. 拖入 `test_red.png` → 标题栏显示 `test_red.png 100x100`。
 3. 按 `1`(drag),全图框选 → 状态栏显示 `R=255.00 G=0.00 B=0.00 Y=76.24`。
-4. 打开 `bin/roi_log.csv`,核对最后一行 = §2 期望值。
+4. 检查测试图源目录的 `test_red_drag.log`,核对最后一条记录 = §2 期望值,并确认不存在 `test_red_log.log`、`roi_log.csv` 或 `roi_log.txt`。
 5. 拖入 `test_grad_r.png`,drag 全图 → R_std ≈ 73.9(0..255 均匀分布总体 std = 255/√12 ≈ 73.90),Y_std ≈ 22.09(0.299×73.90)。
 6. 按 `2`(fix3)任意点一下 → count=9;按 `3`(fix5) → count=25。
 7. 在影像边缘点一下 fix5 → 框被 clamp,仍 count=25 且不崩溃。
-8. 未加载图片时按 `1` 拖曳 / 按 C → 无反应、不崩溃。
+8. 切换到 3x3/5x5 后即使尚未移动鼠标也应在图像中心看到固定框；未加载图片时按 `1` 拖曳 / 按 C → 无反应、不崩溃。
 9. Lab 抽查:white 全图 → L≈100.00,a≈0.00,b≈0.00;black 全图 → L≈0.00。
 10. 与 c-vlcplayer 对照:同图同区域,Lab 差值 < 0.05(同一公式移植,应完全一致)。
 
@@ -97,7 +97,7 @@ def ref_stats(path, x0, y0, x1, y1):
 | GDI+ 像素顺序误读(BGRA vs RGBA) | V2 纯色图验证:R 图必须 R_mean=255,G/B=0,否则交换通道 |
 | JPEG 压缩噪声导致 std≠0 | 数值验证只用 PNG;注明 JPEG 仅功能性测试 |
 | 固定框点到影像外 | 中心 clamp,框恒完整;V9 覆盖 |
-| Lab 负零显示(`-0.00`) | 格式化前 `+0.0` 处理,或接受 `-0.00`(CSV 对比时转 float 再比) |
+| Lab 负零显示(`-0.00`) | 格式化前归零为 `0.00` |
 
 ## 6. 验收结论模板
 
@@ -106,7 +106,7 @@ def ref_stats(path, x0, y0, x1, y1):
 V2-V4 坐标: ✅ count/坐标与预期一致
 V5-V6 RGB/Y: ✅ 与 ref_stats 一致(容差内)
 V7 Lab: ✅ 与 c-vlcplayer 一致,白/黑场正确
-V8 log: ✅ 19 列,2 位小数,append 正常
+V8 log: ✅ 源目录 per-image/per-mode `.log`,`# roi rect` 格式,2 位小数,append 正常
 V9 鲁棒性: ✅ 无崩溃
 结论: 通过 / 不通过(注明失败项)
 ```

@@ -1,5 +1,6 @@
 build/
 bin/*.exe
 bin/*.log
-bin/roi_log.csv
-bin/roi_log.txt
+testdata/*_drag.log
+testdata/*_3x3.log
+testdata/*_5x5.log
