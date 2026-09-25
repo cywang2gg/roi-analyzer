@@ -54,6 +54,7 @@ static void UpdateTitle(void) {
 
 static void UpdateStatus(const char *mouse) {
     char s[512];
+    static char last[512] = { 0 };
     if (g_has_last)
         _snprintf(s, sizeof(s), "%s   |   R=%.2f G=%.2f B=%.2f Y=%.2f (%s rect=(%d,%d)-(%d,%d) n=%d)",
                   mouse ? mouse : "",
@@ -63,6 +64,10 @@ static void UpdateStatus(const char *mouse) {
     else
         _snprintf(s, sizeof(s), "%s", mouse ? mouse : "drop PNG/JPG/BMP here | 1=Drag 2=3x3 3=5x5 C=clear O=open | confirm appends the image log");
     s[sizeof(s) - 1] = '\0';
+    if (strcmp(s, last) == 0)
+        return; /* unchanged text: skip status repaint (mousemove churn) */
+    strncpy(last, s, sizeof(last) - 1);
+    last[sizeof(last) - 1] = '\0';
     SendMessageA(g_status, SB_SETTEXTA, 0, (LPARAM)s);
 }
 
@@ -248,7 +253,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RECT rc;
         if (ROI_OnLUp(&g_roi, &g_view, &g_img, p, &rc)) ConfirmROI(rc);
         ReleaseCapture();
-        InvalidateRect(hwnd, NULL, TRUE);
+        InvalidateRect(hwnd, NULL, FALSE); /* erase would flash; ERASBKGND already skipped */
         return 0;
     }
     case WM_DROPFILES: {

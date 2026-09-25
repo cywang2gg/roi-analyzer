@@ -63,6 +63,11 @@ int ROI_FixRadius(roi_mode_t m)
     }
 }
 
+#define ROI_FIX_MIN_PX 9  /* min on-screen side for fixed 3x3/5x5 overlay */
+
+/* Forward: used by ROI_OnMove drag throttle, defined after ROI_OnLUp. */
+static void img_rect_to_window(const view_t *v, RECT img_rc, RECT *win_rc);
+
 static void clamp_pt(POINT *p, int w, int h)
 {
     if (p->x < 0)
@@ -140,9 +145,26 @@ BOOL ROI_OnMove(roi_state_t *s, const view_t *v, const image_t *img, POINT wp)
         }
         if (ip.x == s->rubber.right && ip.y == s->rubber.bottom)
             return FALSE; /* same cell: no repaint, no flicker */
-        s->rubber.right = ip.x;
-        s->rubber.bottom = ip.y;
-        return TRUE;
+        /* Throttle: skip repaint when the normalized rubber rect maps to
+           the same window rect (sub-screen-pixel change). */
+        {
+            RECT old_img, new_img, old_wr, new_wr;
+            old_img.left = (s->anchor.x < s->rubber.right) ? s->anchor.x : s->rubber.right;
+            old_img.top = (s->anchor.y < s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
+            old_img.right = (s->anchor.x > s->rubber.right) ? s->anchor.x : s->rubber.right;
+            old_img.bottom = (s->anchor.y > s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
+            new_img.left = (s->anchor.x < ip.x) ? s->anchor.x : ip.x;
+            new_img.top = (s->anchor.y < ip.y) ? s->anchor.y : ip.y;
+            new_img.right = (s->anchor.x > ip.x) ? s->anchor.x : ip.x;
+            new_img.bottom = (s->anchor.y > ip.y) ? s->anchor.y : ip.y;
+            img_rect_to_window(v, old_img, &old_wr);
+            img_rect_to_window(v, new_img, &new_wr);
+            s->rubber.right = ip.x;
+            s->rubber.bottom = ip.y;
+            if (EqualRect(&old_wr, &new_wr))
+                return FALSE;
+            return TRUE;
+        }
     }
 
     if (!View_ToImage(v, img->w, img->h, wp, &ip))
@@ -156,11 +178,25 @@ BOOL ROI_OnMove(roi_state_t *s, const view_t *v, const image_t *img, POINT wp)
         ip.x = img->w - 1 - r;
     if (ip.y > img->h - 1 - r)
         ip.y = img->h - 1 - r;
-    if (s->has_preview && ip.x == s->preview.x && ip.y == s->preview.y)
-        return FALSE; /* same cell: no repaint, no flicker */
-    s->preview = ip;
-    s->has_preview = TRUE;
-    return TRUE;
+    /* Fixed modes: repaint only when the SCREEN center moves. At scale<1
+       several image cells collapse to one screen px; repainting per
+       image cell causes jitter repaints with no visible change. */
+    {
+        POINT wc_new, wc_old;
+        BOOL had = s->has_preview;
+        POINT old = s->preview;
+        View_ToWindow(v, ip, &wc_new);
+        s->preview = ip;
+        s->has_preview = TRUE;
+        if (had) {
+            if (ip.x == old.x && ip.y == old.y)
+                return FALSE; /* same cell */
+            View_ToWindow(v, old, &wc_old);
+            if (wc_new.x == wc_old.x && wc_new.y == wc_old.y)
+                return FALSE; /* same screen px: state tracked, no repaint */
+        }
+        return TRUE;
+    }
 }
 
 BOOL ROI_OnLUp(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, RECT *out_img)
@@ -225,28 +261,52 @@ static void draw_rect_outline(HDC hdc, const RECT *rc, COLORREF color)
     DeleteObject(pen);
 }
 
+/* Fixed-mode image center -> window rect, min on-screen size enforced.
+   Storage stays image coords; only the DRAWN rect is enlarged so the box
+   remains visible when scale<1. Data/log path untouched. */
+static void fixed_win_rect(const view_t *v, POINT center_img, int r, RECT *out)
+{
+    POINT c;
+    int side_img = 2 * r + 1; /* 3 or 5 */
+    int side_scr = (int)((float)side_img * v->scale + 0.5f);
+    if (side_scr < ROI_FIX_MIN_PX)
+        side_scr = ROI_FIX_MIN_PX;
+    View_ToWindow(v, center_img, &c);
+    out->left = c.x - side_scr / 2;
+    out->top = c.y - side_scr / 2;
+    out->right = out->left + side_scr;
+    out->bottom = out->top + side_scr;
+}
+
 void ROI_DrawOverlay(HDC hdc, const view_t *v, const roi_state_t *s)
 {
     RECT wr;
-    int r;
+    POINT ctr;
+    int w;
 
     if (!hdc || !v || !s)
         return;
 
     if (s->has_confirmed) {
-        img_rect_to_window(v, s->confirmed, &wr);
+        if (s->mode != MODE_DRAG) {
+            /* Fixed confirm: recover r from stored square size (3/5). */
+            w = s->confirmed.right - s->confirmed.left + 1;
+            ctr.x = (s->confirmed.left + s->confirmed.right) / 2;
+            ctr.y = (s->confirmed.top + s->confirmed.bottom) / 2;
+            fixed_win_rect(v, ctr, (w >= 5) ? 2 : 1, &wr);
+        } else {
+            img_rect_to_window(v, s->confirmed, &wr); /* drag: exact */
+        }
         draw_rect_outline(hdc, &wr, RGB(255, 255, 0)); /* confirmed: yellow */
     }
 
     if (s->mode != MODE_DRAG && s->has_preview && !s->dragging) {
-        RECT prv;
-        r = ROI_FixRadius(s->mode);
-        prv.left = s->preview.x - r;
-        prv.top = s->preview.y - r;
-        prv.right = s->preview.x + r;
-        prv.bottom = s->preview.y + r;
-        img_rect_to_window(v, prv, &wr);
-        draw_rect_outline(hdc, &wr, RGB(255, 255, 255)); /* preview: white */
+        RECT prv_wr;
+        fixed_win_rect(v, s->preview, ROI_FixRadius(s->mode), &prv_wr);
+        /* If preview sits exactly on the confirmed box, skip it: same
+           rect drawn white-after-yellow would hide the yellow confirm. */
+        if (!(s->has_confirmed && s->mode != MODE_DRAG && EqualRect(&prv_wr, &wr)))
+            draw_rect_outline(hdc, &prv_wr, RGB(255, 255, 255)); /* preview: white */
     }
 
     if (s->dragging) {
