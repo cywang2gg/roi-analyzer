@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.3 | 日期：2026-09-26 | 定義 ROI 疊圖互斥顯示規則
+> 版本：v2.4 | 日期：2026-09-27 | Histogram 面板、拖曳即時預覽、啟動 manifest 修正
 
 ## 變更歷史
+
+- **v2.4（2026-09-27）**：右側 Histogram 面板（通道／Log／hover／範圍選取）；DRAG 拖曳中 80ms 節流即時預覽；面板閃爍修正（hover 比對、無背景擦除、分層快取）；啟動改用 comctl32 v6 manifest 並精簡 ICC 旗標。
 
 - **v2.3（2026-09-26）**：格線按模式互斥顯示（GRID3 僅 3×3、GRID5 僅 5×5、DRAG 不顯示）；手動框在所有模式顯示於格線上方（先畫格線後畫手動框）。
 
@@ -23,8 +25,9 @@
 - 支援影像放大與縮小；手動 ROI 與分區 ROI 可同時存在。
 - 在 ROI 上依清單順序標示 1 至 n；每個 ROI 的分析數值以一列顯示於主視窗的 Grid 表格。
 - 使用 Export 按鈕、選單或快速鍵，將目前清單中的全部 ROI 追加至記錄檔。
+- 右側 Histogram 面板：無選取時顯示整張影像，有選取時顯示該 ROI；支援 RGB／Y／R／G／B 通道、線性／對數縱軸、hover 顯示 Level 統計、圖表拖曳選取 Level 範圍。
 
-非目標：視訊、RTSP、LDC、直方圖視窗、Macbeth 比對，以及 ROI 拖曳移動或縮放編輯。
+非目標：視訊、RTSP、LDC、Macbeth 比對，以及 ROI 拖曳移動或縮放編輯。
 
 ## 2. 目錄結構
 
@@ -39,16 +42,21 @@ roi-analyzer/
 │   ├── view.h/.c      # 縮放、置中與視窗／影像座標換算
 │   ├── roi.h/.c       # ROI 清單、拖曳狀態機與 3×3／5×5 分區
 │   ├── analyze.h/.c   # mean／std 與 Lab 計算
+│   ├── histogram.h/.c # 直方圖統計（純計算，不依賴 GUI）
+│   ├── histpanel.h/.c # Histogram 面板子視窗：通道選單、繪圖、滑鼠互動
 │   ├── table.h/.c     # Grid 表格（ListView report）封裝
-│   └── export.h/.c    # 記錄檔輸出
+│   ├── export.h/.c    # 記錄檔輸出
+│   ├── app.manifest   # comctl32 v6 manifest（現代控制項樣式）
+│   └── app.rc         # 資源檔：嵌入 manifest
 ├── bin/               # 輸出執行檔
 ├── build/             # CMake 建置目錄（不納入版控）
 └── docs/
     ├── 01_architecture_v1.md  # 本文件
+    ├── 01_histogram_arch.md   # Histogram 模組設計書
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 1,200 行 C 程式碼，無第三方依賴；使用 Win32、GDI+ 與系統內建 Common Controls。
+預估約 3,500 行 C 程式碼，無第三方依賴；使用 Win32、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 
@@ -57,7 +65,7 @@ roi-analyzer/
 typedef struct {
     unsigned char *px;      // BGRA，每像素 4 位元組
     int w, h, pitch;        // pitch = w * 4
-    wchar_t path[MAX_PATH]; // 來源影像路徑（供匯出使用）
+    char path[MAX_PATH];    // 來源影像路徑（ANSI 建置；供匯出使用）
     BOOL valid;
 } image_t;
 ```
@@ -116,8 +124,7 @@ typedef struct {
 ```c
 // app.h — 全域狀態；僅 main.c 定義一次，其餘模組透過 extern 存取
 typedef struct {
-    HWND hwnd_main, hwnd_canvas, hwnd_table, hwnd_status;
-    HWND hwnd_tabs;         // Drag／3x3／5x5 表格頁籤
+    HWND hwnd_main, hwnd_canvas, hwnd_table, hwnd_tabs, hwnd_status, hwnd_hist;
     HWND hwnd_btn_export, hwnd_btn_clear, hwnd_chk_multi;
     image_t img;
     view_t view;
@@ -126,10 +133,19 @@ typedef struct {
     roi_mode_t mode;
     roi_mode_t table_page;  // 目前表格頁籤所代表的 ROI 來源
     BOOL multi;             // 手動框選的複選新增模式
+    BOOL show_hist;         // Histogram 面板是否顯示；預設 TRUE
+    unsigned int img_gen;   // 每次 Image_Load 成功就 +1（直方圖快取鍵）
 } app_t;
 
 extern app_t g_app;
 ```
+
+同步入口（定義於 `main.c`）：
+
+- `App_RoiChanged()` — 重建表格、重繪畫布、更新直方圖與狀態列
+- `App_SelectROI(idx)` — 設選取＋切換對應頁籤＋同步三者
+- `App_UpdateHistogram()` — 依 `selected` 推送整張或 ROI 來源給面板
+- `App_PreviewHistogram(img_rc)` — 拖曳中 80ms 節流預覽，不動清單／選取／表格
 
 所有 ROI（手動框、分區格線、編號及橡皮筋起終點）一律以影像座標儲存；繪製時才依目前 `view_t` 換算成畫布座標，因此縮放時會同步變化。縮放不改變 ROI 座標或分析結果；表格數值永遠是原始影像座標上的像素統計。
 
@@ -137,7 +153,9 @@ extern app_t g_app;
 
 | 模組 | 主要函式 | 說明 |
 |------|----------|------|
-| main | `WinMain`、`MainWndProc`、`Layout()` | 建立主視窗、選單與子控制項；處理 `WM_SIZE`、`WM_COMMAND`、`WM_NOTIFY` 與 `WM_DROPFILES` |
+| main | `WinMain`、`MainWndProc`、`Layout()` | 建立主視窗、選單與子控制項；處理 `WM_SIZE`、`WM_COMMAND`、`WM_NOTIFY` 與 `WM_DROPFILES`；提供 `App_*` 同步入口 |
+| histogram | `Hist_Compute()`、`Hist_RangeStats()` | 純計算：256-bin 統計、mean／std／median、範圍統計；不依賴 GUI |
+| histpanel | `HistPanel_Register/Create/SetSource/ClearSource/SetChannel/SetLogScale` | 右側面板子視窗；三層快取（base／ramp／back）雙緩衝繪製；hover 比對＋子區域重繪；詳見 `01_histogram_arch.md` |
 | canvas | `Canvas_Register()`、`CanvasWndProc` | 畫布子視窗；雙緩衝繪製影像、ROI、編號、格線與橡皮筋；處理左鍵 ROI 與右鍵平移事件並呼叫相關模組 |
 | image | `Image_Load(img, path)`、`Image_Free(img)` | GDI+ `FromFile` → `LockBits(PixelFormat32bppARGB)` → 複製到 `px`；記憶體中的像素順序為 BGRA |
 | view | `View_Update()`、`View_Pan()`、`View_Reset()`、`View_SetZoom()`、`View_ToImage()`、`View_ToWindow()`、`View_RectToWindow()` | 依 fit、zoom 與 pan 定位影像、限制平移邊界並換算座標；座標換算後限制在 `[0, w-1]` 與 `[0, h-1]` |
@@ -153,8 +171,8 @@ extern app_t g_app;
 ```text
 IDLE --LDown（影像內）--> DRAGGING
   設定滑鼠捕捉，記錄 anchor_img、down_win 與本次 additive 狀態
-DRAGGING --Move--> 更新 cur_img，讓畫布重繪白色橡皮筋
-DRAGGING --Esc--> 取消橡皮筋、釋放滑鼠捕捉，回到 IDLE
+DRAGGING --Move--> 更新 cur_img，讓畫布重繪白色橡皮筋；同時以 80ms 節流呼叫 `App_PreviewHistogram()`，直方圖即時跟隨橡皮筋矩形（標籤 `Drag (preview)`，不動清單／選取／表格）
+DRAGGING --Esc--> 取消橡皮筋、釋放滑鼠捕捉，呼叫 `App_UpdateHistogram()` 回到選取／整張，回到 IDLE
 DRAGGING --LUp-->
   ├─ 位移 < 3 個畫布像素：視為點擊
   │    命中 ROI → 選取該 ROI，並同步表格；未命中 → 清除選取
@@ -223,11 +241,16 @@ y_j = \left\lfloor \frac{j \cdot H}{N} \right\rfloor,\quad i,j=0..N
 | 方向鍵 | 平移影像 20 畫布像素；`Shift` + 方向鍵平移 100 像素 |
 | `0` | 重設為置中 fit（zoom=1.0、pan=0） |
 | `Delete` | 刪除選取的手動 ROI（僅限 DRAG 模式） |
+| `Esc` | 拖曳中：取消橡皮筋並恢復直方圖；非拖曳：清除選取（直方圖回整張） |
+| `H` | 顯示／隱藏 Histogram 面板 |
+| `A`／`Y`／`R`／`G`／`B` | 切換直方圖通道（RGB／Y／R／G／B） |
+| `L` | 直方圖線性／對數縱軸 |
 | `C` | 清除目前表格頁籤對應來源的 ROI |
 | `Shift+C` | 清除全部來源 ROI 與表格內容 |
 | `Ctrl+E` | 匯出目前全部 ROI |
 | `O` | 開啟影像檔案對話框 |
-| `Esc` | 取消進行中的拖曳 |
+
+註：舊按鍵（`1/2/3/M/C/O/Del/Esc/0/方向鍵`）走 canvas `WM_KEYDOWN`，焦點在表格／下拉選單時不生效；新按鍵（`H/A/Y/R/G/B/L`）走 Accelerator Table，全域生效。`Ctrl+E` 為選單加速鍵。
 
 ## 6. 分析公式
 
@@ -310,6 +333,7 @@ Lab L=53.24 a=80.11 b=67.22
 - **Mode**：`Drag [1]`、`3x3 Grid [2]`、`5x5 Grid [3]`、分隔線、`Multi Select [M]`。複選項目的勾選狀態與按鈕列核取方塊同步。
 - **Edit**：`Delete Selected ROI [Del]`、`Clear Current Tab ROI [C]`、`Clear All ROI [Shift+C]`。
 - **Log**：`Open Log File`、`Open Folder`。
+- **View**：`Histogram Panel [H]`（打勾項）、分隔線、`Channel: RGB [A]／Luminosity [Y]／Red [R]／Green [G]／Blue [B]`（單選打勾）、`Log Scale [L]`（打勾項）。
 
 `Layout()` 於 `WM_SIZE` 呼叫，依序配置子視窗：
 
@@ -350,22 +374,26 @@ L = \text{off}_x + x_0 \cdot s,\quad R = \text{off}_x + (x_1 + 1) \cdot s
 ```cmake
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.10)
-project(roi_analyzer C)
+project(roi_analyzer C RC)
 set(CMAKE_C_STANDARD 11)
 
 add_executable(roi_analyzer
+    src/app.rc
     src/main.c
     src/canvas.c
     src/image.c
     src/view.c
     src/roi.c
     src/analyze.c
+    src/histogram.c
+    src/histpanel.c
     src/table.c
     src/export.c
 )
 
-target_compile_options(roi_analyzer PRIVATE -Wall -Wextra)
-target_compile_definitions(roi_analyzer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
+target_include_directories(roi_analyzer PRIVATE src)
+target_compile_definitions(roi_analyzer PRIVATE NOMINMAX)
 target_link_libraries(roi_analyzer user32 gdi32 kernel32 comctl32 comdlg32 gdiplus shell32 m)
 
 set_target_properties(roi_analyzer PROPERTIES
@@ -377,14 +405,17 @@ set_target_properties(roi_analyzer PROPERTIES
 ```bash
 cd C:/Github/roi-analyzer
 export PATH="/c/msys64/ucrt64/bin:$PATH"   # cc1.exe 執行時需可載入 libmpfr-6.dll
+rm -rf build
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_MAKE_PROGRAM="C:/msys64/ucrt64/bin/mingw32-make.exe"
 cmake --build build
 ```
 
 注意事項：
 
-- 啟動時呼叫 `InitCommonControlsEx(ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES)`，否則 ListView 或狀態列無法建立。
-- 本設計啟用 `UNICODE`；檔案路徑使用 `wchar_t`。寫入記錄檔時以 `WideCharToMultiByte(CP_UTF8, ...)` 轉為 UTF-8，避免中文路徑或內容亂碼。
+- 啟動時呼叫 `App_InitCommonControls()`：`ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES`。不要加 `ICC_STANDARD_CLASSES`（無 v6 manifest 時會回傳 FALSE）。失敗時 fallback `InitCommonControls()` 並輸出 Debug 訊息，**不中止程式**；真正檢查點是各 `CreateWindowEx` 回傳值。
+- `src/app.manifest` 嵌入 comctl32 v6（`src/app.rc`：`1 RT_MANIFEST "app.manifest"`），否則 `LVS_EX_DOUBLEBUFFER` 無效且控制項為 Win95 外觀。`project()` 需宣告 `RC` 語言；`-Wall -Wextra` 用 generator expression 限定 C 語言，避免傳給 windres。改 `project()` 後需刪 `build/` 重配。
+- 本設計保持 **ANSI 建置（不加 UNICODE／_UNICODE）**；`image_t.path` 為 `char`，中文路徑依賴此行為。面板來源標籤的 `wchar_t` 僅作顯示字串（`TextOutW`），與路徑無關。
+- 主視窗與 Histogram 面板皆設 `WS_CLIPCHILDREN`；面板 `WM_ERASEBKGND` 回 1、`hbrBackground = NULL`，由三層快取（base／ramp／back）雙緩衝繪製，避免滑鼠移動閃爍。
 - 編譯選項使用 `-Wall -Wextra`，驗收標準為零警告。
 
 ## 11. 待確認事項

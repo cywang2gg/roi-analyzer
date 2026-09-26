@@ -4,9 +4,11 @@
 
 # Histogram 模組 — 架構設計書
 
-> 版本 v1.1 | 2026-09-26 | 獨立模組,整合目標:ROI Analyzer v2.3
+> 版本 v1.2 | 2026-09-27 | 拖曳即時預覽、閃爍修正、啟動 manifest
 
 變更歷史:
+
+- v1.2 (2026-09-27):DRAG 拖曳中 80ms 節流即時預覽(`App_PreviewHistogram`)；閃爍修正(hover 比對、無背景擦除、三層快取雙緩衝)；啟動改用 comctl32 v6 manifest 並精簡 ICC 旗標。
 
 - v1.0 (2026-09-26):新模組。提供類似 Photoshop 的 Histogram 面板。
   - 資料來源:沒有選取 ROI 時顯示整張影像,有選取時顯示該 ROI
@@ -32,6 +34,7 @@
 
 - 支援線性 / 對數縱軸
 - 滑鼠停留時顯示該 Level 的 Count 與 Percentile;拖曳時選取 Level 範圍並顯示範圍統計
+- DRAG 拖曳橡皮筋時 80ms 節流即時預覽(標籤 `Drag (preview)`);放開走正式流程
 
 非目標:不做 Levels / Curves 調整、不做即時視訊直方圖、不做多 ROI 聯集直方圖、不寫入 log。
 
@@ -125,6 +128,7 @@ typedef struct {
     hist_channel_t channel;
     BOOL log_scale;
     histogram_t hist;
+    wchar_t label[160];     // 來源標籤(自繪,TextOutW);路徑仍走 ANSI image_t.path
     int hover_level;          // -1 = 無
     BOOL selecting;           // 拖曳選取 Level 範圍中
     int sel_lo, sel_hi;       // 選取範圍;sel_lo < 0 表示無
@@ -132,8 +136,40 @@ typedef struct {
     RECT rc_ramp;             // 下方漸層條
     RECT rc_stats;            // 統計文字區
     HFONT font;
+    BOOL tracking;            // TrackMouseEvent 已註冊
+    HDC base_dc;              // 圖表底層:柱體 + 選取範圍,不含 hover 線
+    HBITMAP base_bmp;
+    HGDIOBJ base_old;
+    void *base_bits;
+    HDC back_dc;              // 整面板 back buffer
+    HBITMAP back_bmp;
+    HGDIOBJ back_old;
+    HDC ramp_dc;              // 漸層條快取,channel 改變時重畫
+    HBITMAP ramp_bmp;
+    HGDIOBJ ramp_old;
+    void *ramp_bits;
+    int buffer_width, buffer_height;   // back 尺寸
+    int graph_width, graph_height;     // base 尺寸
+    int ramp_width, ramp_height;       // ramp 尺寸
+    BOOL base_dirty;          // 資料/通道/Log/尺寸/選取改變時重畫 base
+    BOOL ramp_dirty;          // 通道改變時重畫 ramp
 } hist_panel_t;
 ```
+
+### 內部狀態補充(v1.2)
+
+- ` tracking`：`TrackMouseEvent` 只在未註冊時呼叫；`WM_MOUSELEAVE` 清掉。
+- 三層快取尺寸只在 `ensure_buffers()` 比對改變時重建；`WM_DESTROY` 釋放。
+- hover 移動**不設** `base_dirty`，只重新 compose；`base_dirty` 只由 SetSource 未命中、ClearSource、通道／Log 切換、`WM_SIZE`、選取改變設定。
+
+### 繪製路徑(v1.2,防閃爍)
+
+- 註冊類別 `hbrBackground = NULL`；`WM_ERASEBKGND` 回 1（背景由 `WM_PAINT` 的 back buffer 負責）。
+- 面板 `WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS`；主視窗加 `WS_CLIPCHILDREN`。
+- `WM_MOUSEMOVE`：新 level == `hover_level` 且不在 selecting，直接 return；需更新時只 `InvalidateRect(graph/stats, FALSE)`，`bErase` 一律 FALSE；hover 路徑不送 `WM_NOTIFY`。
+- `WM_MOUSELEAVE`：`hover_level` 已是 -1 就不 invalidate。
+- `WM_PAINT`：`BeginPaint` → `ensure_buffers` → base/ramp dirty 才重畫 → compose 到 back（背景、標籤、`base→graph`、`hover` 白線、`ramp`、統計）→ `BitBlt(back→hdc)` 只針對 `ps.rcPaint`；compose／base 函式內不可 `InvalidateRect`／`SetWindowText`／`Hist_Compute`。
+- `paint_chart` 不再每幀 `CreateDIBSection`；漸層條 channel 改變時畫進 ramp 快取，paint 只 `BitBlt`。
 
 ## 4. 計算規格(`histogram.c`)
 
@@ -174,6 +210,15 @@ bin[HIST_Y][Yi]++;
 - 4000×3000 影像單次掃描約 12M px,量級為 30ms,在 UI 執行緒同步執行
 - 快取條件:`img_gen`、`src`、`whole` 都相同時,`HistPanel_SetSource` 不重算,只重繪,但仍更新呼叫端提供的 label(ROI 刪除後來源編號可能遞補)
 - 切換通道、切換對數縱軸、改變視窗大小:**只重繪,不重算**(4 個通道在同一次掃描已全部算好)
+- 拖曳中 preview:每次節流觸發都呼叫 `HistPanel_SetSource`，矩形改變即重算（預期行為）；80ms 節流保證大圖不卡
+
+### 6.5b 拖曳即時預覽(v1.2)
+
+新增 `App_PreviewHistogram(RECT img_rc)`（`main.c`）：組 `Drag (preview) (x0,y0)-(x1,y1)` label，呼叫 `HistPanel_SetSource`。**不動** `roi_list`、`selected`、表格。
+
+`canvas.c` `WM_MOUSEMOVE` 的 dragging 分支：`ROI_OnMove` 成功後，以 `GetTickCount()` 節流（`> 80ms`，`static DWORD s_last_preview_tick`）才 preview。矩形由 `drag.anchor_img`／`cur_img` normalize，零面積跳過；`!show_hist` 或無圖跳過。
+
+LUp 保持原正式流程（建框＋`App_RoiChanged`＋最終精確更新）。Esc 取消拖曳時調一次 `App_UpdateHistogram()` 回到選取／整張，避免面板停在 preview。`SetMode` 中途切換也清 dragging。
 
 ## 5. 面板版面與繪製(`histpanel.c`)
 
@@ -375,7 +420,8 @@ hist:   (client_w - hist_w, 0, hist_w, upper_h)
 ### 6.7 初始化
 
 ```c
-// WinMain 內,在建立主視窗之前
+// WinMain 內,改為只呼叫,不因 FALSE 結束程式
+App_InitCommonControls();   // LISTVIEW | BAR | TAB;失敗 fallback InitCommonControls
 HistPanel_Register(hinst);
 
 // 主視窗 WM_CREATE 內
@@ -383,17 +429,20 @@ g_app.hwnd_hist = HistPanel_Create(hwnd, IDC_HISTPANEL);
 g_app.show_hist = TRUE;
 ```
 
-`InitCommonControlsEx` 已包含 `ICC_STANDARD_CLASSES` 時,下拉選單與勾選框不需要額外初始化。
+`InitCommonControlsEx` **不要加** `ICC_STANDARD_CLASSES`（無 v6 manifest 時回傳 FALSE）。v6 由 `src/app.manifest`＋`src/app.rc` 嵌入（見主架構書 §10）；`project()` 宣告 `C RC`，`-Wall -Wextra` 用 generator expression 限定 C 語言。
+
+`InitCommonControlsEx` 精簡為 `ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES` 時,下拉選單與勾選框不需要額外初始化(ComboBox / Button 屬 user32 內建類別)。
 
 ### 6.8 CMake
 
 ```cmake
-# File: CMakeLists.txt(add_executable 內新增兩行)
+# File: CMakeLists.txt(add_executable 內新增兩行 + app.rc)
+    src/app.rc
     src/histogram.c
     src/histpanel.c
 ```
 
-不需新增連結庫(DIB Section、下拉選單都屬於 `gdi32` / `user32`)。
+不需新增連結庫(DIB Section、下拉選單都屬於 `gdi32` / `user32`)。`project()` 需宣告 `C RC` 且用 generator expression 限定 warning flags(見主架構書 §10)；改後刪 `build/` 重配。
 
 ## 7. 驗收項目(補入 `02_verification.md`)
 
@@ -411,6 +460,10 @@ g_app.show_hist = TRUE;
 | H10 | 圖表拖曳選取 0..127 | 顯示範圍 Count 與 Percentile;來源改變後選取範圍清除 |
 | H11 | 視窗縮小到 < 520px 寬 | 面板自動隱藏;放大後自動恢復 |
 | H12 | 編譯 | `-Wall -Wextra` 0 warning |
+| H13 | 滑鼠在圖表區緩慢移動 | 只有白線移動,柱體/背景/下拉選單不閃 |
+| H14 | 滑鼠在圖表區靜止 5 秒 | 不再重繪(no-erase + hover 比對) |
+| H15 | DRAG 拖曳橡皮筋 | 直方圖約 12fps 跟隨,標籤 `Drag (preview)`;放開變正式編號;Esc 取消回到選取/整張 |
+| H16 | 雙擊 exe | 無啟動警語;控制項為現代樣式(v6 manifest) |
 
 ## 8. 待確認事項
 

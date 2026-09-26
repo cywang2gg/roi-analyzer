@@ -8,6 +8,7 @@
 
 static BOOL g_panning;
 static POINT g_pan_last;
+static DWORD s_last_preview_tick;
 
 static void draw_outline(HDC hdc, const RECT *rc, COLORREF color, int width,
                          int pen_style)
@@ -153,8 +154,27 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         if (g_app.drag.dragging &&
-            ROI_OnMove(&g_app.drag, &g_app.img, &g_app.view, p))
+            ROI_OnMove(&g_app.drag, &g_app.img, &g_app.view, p)) {
             InvalidateRect(hwnd, NULL, FALSE);
+            if (g_app.mode == MODE_DRAG && g_app.show_hist &&
+                g_app.img.valid) {
+                DWORD tick = GetTickCount();
+                if (tick - s_last_preview_tick > 80) {
+                    RECT img_rc;
+                    POINT a = g_app.drag.anchor_img;
+                    POINT b = g_app.drag.cur_img;
+                    img_rc.left = a.x < b.x ? a.x : b.x;
+                    img_rc.top = a.y < b.y ? a.y : b.y;
+                    img_rc.right = a.x > b.x ? a.x : b.x;
+                    img_rc.bottom = a.y > b.y ? a.y : b.y;
+                    if (img_rc.left < img_rc.right &&
+                        img_rc.top < img_rc.bottom) {
+                        App_PreviewHistogram(img_rc);
+                        s_last_preview_tick = tick;
+                    }
+                }
+            }
+        }
         App_UpdateStatus();
         return 0;
     }
@@ -221,6 +241,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             g_app.drag.dragging = FALSE;
             ReleaseCapture();
             InvalidateRect(hwnd, NULL, FALSE);
+            App_UpdateHistogram();
             return 0;
         }
         if (wparam == VK_ESCAPE) {

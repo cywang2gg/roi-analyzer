@@ -29,5 +29,6 @@ void App_SetTablePage(roi_mode_t page);
 void App_SelectROI(int global_index);
 void App_UpdateStatus(void);
 void App_UpdateHistogram(void);
+void App_PreviewHistogram(RECT img_rc);
 
 #endif

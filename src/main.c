@@ -211,6 +211,19 @@ void App_UpdateHistogram(void)
     }
 }
 
+void App_PreviewHistogram(RECT img_rc)
+{
+    wchar_t label[160];
+
+    if (!g_app.show_hist || !g_app.hwnd_hist || !g_app.img.valid)
+        return;
+    swprintf(label, sizeof(label) / sizeof(label[0]),
+             L"Drag (preview) (%d,%d)-(%d,%d)",
+             img_rc.left, img_rc.top, img_rc.right, img_rc.bottom);
+    HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, &img_rc, label,
+                        g_app.img_gen);
+}
+
 void App_SetTablePage(roi_mode_t page)
 {
     int tab = page == MODE_GRID3 ? 1 : (page == MODE_GRID5 ? 2 : 0);
