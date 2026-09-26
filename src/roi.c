@@ -41,17 +41,23 @@ void ROI_Init(roi_list_t *list, drag_state_t *drag)
 {
     if (list) {
         memset(list, 0, sizeof(*list));
-        list->selected = -1;
+        ROI_SetSelected(list, -1);
     }
     if (drag)
         memset(drag, 0, sizeof(*drag));
+}
+
+void ROI_SetSelected(roi_list_t *list, int index)
+{
+    if (list)
+        list->selected = index >= 0 && index < list->count ? index : -1;
 }
 
 void ROI_Clear(roi_list_t *list, drag_state_t *drag)
 {
     if (list) {
         list->count = 0;
-        list->selected = -1;
+        ROI_SetSelected(list, -1);
     }
     if (drag)
         memset(drag, 0, sizeof(*drag));
@@ -70,10 +76,10 @@ void ROI_ClearSource(roi_list_t *list, roi_source_t source)
             if (out != i)
                 list->items[out] = list->items[i];
             if (i == selected_item)
-                list->selected = out;
+                ROI_SetSelected(list, out);
             out++;
         } else if (i == selected_item) {
-            list->selected = -1;
+            ROI_SetSelected(list, -1);
         }
     }
     list->count = out;
@@ -85,7 +91,7 @@ void ROI_Destroy(roi_list_t *list)
         return;
     free(list->items);
     memset(list, 0, sizeof(*list));
-    list->selected = -1;
+    ROI_SetSelected(list, -1);
 }
 
 BOOL ROI_Add(roi_list_t *list, const image_t *img, RECT rc, roi_source_t source)
@@ -114,8 +120,8 @@ BOOL ROI_Add(roi_list_t *list, const image_t *img, RECT rc, roi_source_t source)
     rc.bottom = list->items[list->count].res.y1;
     list->items[list->count].rc = rc;
     list->items[list->count].source = source;
-    list->selected = list->count;
     list->count++;
+    ROI_SetSelected(list, list->count - 1);
     return TRUE;
 }
 
@@ -128,11 +134,11 @@ BOOL ROI_Remove(roi_list_t *list, int index)
                 (size_t)(list->count - index - 1) * sizeof(*list->items));
     list->count--;
     if (list->count == 0)
-        list->selected = -1;
+        ROI_SetSelected(list, -1);
     else if (list->selected == index)
-        list->selected = -1;
+        ROI_SetSelected(list, -1);
     else if (list->selected > index)
-        list->selected--;
+        ROI_SetSelected(list, list->selected - 1);
     return TRUE;
 }
 
@@ -199,7 +205,7 @@ BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n)
             }
         }
     }
-    list->selected = -1;
+    ROI_SetSelected(list, -1);
     return TRUE;
 }
 
@@ -267,7 +273,7 @@ BOOL ROI_OnLUp(roi_list_t *list, drag_state_t *drag, const image_t *img,
     if (was_click)
         *was_click = click;
     if (click) {
-        list->selected = ROI_HitTest(list, end);
+        ROI_SetSelected(list, ROI_HitTest(list, end));
         return TRUE;
     }
     if (!drag->additive) {

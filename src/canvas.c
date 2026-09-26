@@ -135,7 +135,8 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             POINT ip;
             if (View_ToImage(&g_app.view, g_app.img.w, g_app.img.h, p, &ip)) {
                 App_SelectROI(ROI_HitTest(&g_app.rois, ip));
-            }
+            } else
+                App_SelectROI(-1);
         }
         return 0;
     }
@@ -220,6 +221,33 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             g_app.drag.dragging = FALSE;
             ReleaseCapture();
             InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        if (wparam == VK_ESCAPE) {
+            App_SelectROI(-1);
+            return 0;
+        }
+        if (wparam == '1' || wparam == '2' || wparam == '3' ||
+            wparam == 'M' || wparam == 'O' ||
+            (wparam == 'E' && (GetKeyState(VK_CONTROL) & 0x8000)) ||
+            wparam == VK_DELETE || wparam == 'C' ||
+            wparam == VK_ADD || wparam == VK_SUBTRACT ||
+            wparam == VK_OEM_PLUS || wparam == VK_OEM_MINUS) {
+            int command = 0;
+            if (wparam == '1') command = 111;
+            else if (wparam == '2') command = 112;
+            else if (wparam == '3') command = 113;
+            else if (wparam == 'M') command = 114;
+            else if (wparam == 'O') command = 101;
+            else if (wparam == 'E') command = 102;
+            else if (wparam == VK_DELETE) command = 121;
+            else if (wparam == 'C')
+                command = (GetKeyState(VK_SHIFT) & 0x8000) ? 123 : 122;
+            else if (wparam == VK_ADD || wparam == VK_OEM_PLUS)
+                command = 141;
+            else
+                command = 142;
+            SendMessage(GetParent(hwnd), WM_COMMAND, (WPARAM)command, 0);
             return 0;
         }
         if (wparam == '0') {

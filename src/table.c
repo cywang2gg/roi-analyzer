@@ -12,6 +12,15 @@ static const int g_widths[] = {
     38, 150, 65, 75, 70, 75, 70, 75, 70, 75, 70, 70, 70, 70
 };
 
+static void report_create_failure(const char *control)
+{
+    char message[160];
+    DWORD error = GetLastError();
+    snprintf(message, sizeof(message), "Create %s failed (GetLastError=%lu).",
+             control, (unsigned long)error);
+    MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
+}
+
 HWND Table_Create(HWND parent, HINSTANCE instance, int control_id)
 {
     HWND hwnd;
@@ -23,8 +32,10 @@ HWND Table_Create(HWND parent, HINSTANCE instance, int control_id)
                            LVS_SHOWSELALWAYS | LVS_SINGLESEL,
                            0, 0, 0, 0, parent, (HMENU)(INT_PTR)control_id,
                            instance, NULL);
-    if (!hwnd)
+    if (!hwnd) {
+        report_create_failure("ListView");
         return NULL;
+    }
     ListView_SetExtendedListViewStyle(hwnd, LVS_EX_FULLROWSELECT |
                                       LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
     ZeroMemory(&col, sizeof(col));
@@ -33,8 +44,16 @@ HWND Table_Create(HWND parent, HINSTANCE instance, int control_id)
     for (i = 0; i < (int)(sizeof(g_headers) / sizeof(g_headers[0])); i++) {
         col.pszText = (LPSTR)g_headers[i];
         col.cx = g_widths[i];
-        if (ListView_InsertColumn(hwnd, i, &col) == -1)
+        if (ListView_InsertColumn(hwnd, i, &col) == -1) {
+            DWORD error = GetLastError();
+            char message[160];
+            snprintf(message, sizeof(message),
+                     "Could not initialize ListView columns (GetLastError=%lu).",
+                     (unsigned long)error);
+            MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
+            DestroyWindow(hwnd);
             return NULL;
+        }
     }
     return hwnd;
 }

@@ -5,10 +5,12 @@
 #include <gdiplus/gdiplus.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "app.h"
 #include "canvas.h"
 #include "export.h"
+#include "histpanel.h"
 #include "table.h"
 
 #define IDM_OPEN       101
@@ -25,25 +27,71 @@
 #define IDM_FOLDER     132
 #define IDM_ZOOM_IN    141
 #define IDM_ZOOM_OUT   142
+#define IDM_HISTOGRAM  151
+#define IDM_HIST_RGB   152
+#define IDM_HIST_Y     153
+#define IDM_HIST_R     154
+#define IDM_HIST_G     155
+#define IDM_HIST_B     156
+#define IDM_HIST_LOG   157
 #define IDC_CANVAS     1001
 #define IDC_TABLE      1002
 #define IDC_EXPORT     1003
 #define IDC_CLEAR      1004
 #define IDC_MULTI      1005
 #define IDC_TABS       1006
+#define IDC_HISTPANEL  1007
 
 app_t g_app;
 
 static ULONG_PTR g_gdiplus;
 static HACCEL g_accelerators;
 static BOOL g_syncing_table;
+static BOOL g_main_wm_create_started;
 static HMENU g_menu_mode;
+static HMENU g_menu_view;
+static hist_channel_t g_hist_channel = HCH_RGB;
+static BOOL g_hist_log;
 
+static BOOL App_InitCommonControls(void);
 static void Layout(void);
 static void SetMode(roi_mode_t mode);
 static void SetMulti(BOOL multi);
 static void ExportCurrent(void);
 static void ChangeZoom(float factor);
+static void SetHistogramChannel(hist_channel_t channel);
+
+static BOOL App_InitCommonControls(void)
+{
+    INITCOMMONCONTROLSEX icc;
+
+    ZeroMemory(&icc, sizeof(icc));
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES;
+    if (InitCommonControlsEx(&icc))
+        return TRUE;
+
+    {
+        DWORD error = GetLastError();
+        char message[160];
+        InitCommonControls();
+        snprintf(message, sizeof(message),
+                 "InitCommonControlsEx failed (GetLastError=%lu); "
+                 "attempted InitCommonControls fallback.\n",
+                 (unsigned long)error);
+        OutputDebugStringA(message);
+    }
+    return FALSE;
+}
+
+static void ReportCreateWindowFailureA(const char *control)
+{
+    char message[160];
+    DWORD error = GetLastError();
+    snprintf(message, sizeof(message), "Create %s failed (GetLastError=%lu).",
+             control, (unsigned long)error);
+    MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
+}
 
 static const char *image_basename(const char *path)
 {
@@ -122,7 +170,45 @@ void App_RoiChanged(void)
     }
     if (g_app.hwnd_canvas)
         InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+    App_UpdateHistogram();
     App_UpdateStatus();
+}
+
+void App_UpdateHistogram(void)
+{
+    wchar_t label[160];
+    if (!g_app.show_hist || !g_app.hwnd_hist)
+        return;
+    if (!g_app.img.valid) {
+        HistPanel_ClearSource(g_app.hwnd_hist);
+        return;
+    }
+    if (g_app.rois.selected >= 0 && g_app.rois.selected < g_app.rois.count) {
+        const roi_item_t *item = &g_app.rois.items[g_app.rois.selected];
+        const roi_result_t *result = &item->res;
+        wchar_t mode_label[32];
+        const char *mode_ascii;
+        int number = ROI_SourceIndex(&g_app.rois, g_app.rois.selected) + 1;
+        if (item->source == ROI_SRC_MANUAL)
+            mode_ascii = ROI_ModeLabel(MODE_DRAG);
+        else if (item->source == ROI_SRC_GRID3)
+            mode_ascii = ROI_ModeLabel(MODE_GRID3);
+        else
+            mode_ascii = ROI_ModeLabel(MODE_GRID5);
+        if (MultiByteToWideChar(CP_ACP, 0, mode_ascii, -1, mode_label,
+                                (int)(sizeof(mode_label) / sizeof(mode_label[0]))) <= 0)
+            mode_label[0] = L'\0';
+        swprintf(label, sizeof(label) / sizeof(label[0]),
+                 L"%ls #%d (%d,%d)-(%d,%d)", mode_label, number,
+                 result->x0, result->y0, result->x1, result->y1);
+        HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, &item->rc, label,
+                            g_app.img_gen);
+    } else {
+        swprintf(label, sizeof(label) / sizeof(label[0]),
+                 L"Entire Image (%dx%d)", g_app.img.w, g_app.img.h);
+        HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, NULL, label,
+                            g_app.img_gen);
+    }
 }
 
 void App_SetTablePage(roi_mode_t page)
@@ -131,14 +217,15 @@ void App_SetTablePage(roi_mode_t page)
     g_app.table_page = page;
     if (g_app.hwnd_tabs)
         TabCtrl_SetCurSel(g_app.hwnd_tabs, tab);
-    App_RoiChanged();
+    App_SelectROI(-1);
 }
 
 void App_SelectROI(int global_index)
 {
+    roi_source_t source;
     if (global_index >= 0 && global_index < g_app.rois.count) {
-        roi_source_t source = g_app.rois.items[global_index].source;
-        g_app.rois.selected = global_index;
+        source = g_app.rois.items[global_index].source;
+        ROI_SetSelected(&g_app.rois, global_index);
         if (source == ROI_SRC_GRID3)
             g_app.table_page = MODE_GRID3;
         else if (source == ROI_SRC_GRID5)
@@ -149,13 +236,16 @@ void App_SelectROI(int global_index)
             TabCtrl_SetCurSel(g_app.hwnd_tabs,
                 g_app.table_page == MODE_GRID3 ? 1 :
                 (g_app.table_page == MODE_GRID5 ? 2 : 0));
-        App_RoiChanged();
-        if (g_app.hwnd_table)
-            Table_Select(g_app.hwnd_table, Table_FindRow(g_app.hwnd_table,
-                                                         global_index));
     } else {
-        g_app.rois.selected = -1;
-        App_RoiChanged();
+        ROI_SetSelected(&g_app.rois, -1);
+    }
+    App_RoiChanged();
+    if (g_app.hwnd_table && g_app.rois.selected >= 0) {
+        BOOL was_syncing = g_syncing_table;
+        g_syncing_table = TRUE;
+        Table_Select(g_app.hwnd_table, Table_FindRow(g_app.hwnd_table,
+                                                     g_app.rois.selected));
+        g_syncing_table = was_syncing;
     }
 }
 
@@ -201,21 +291,54 @@ static void SetMulti(BOOL multi)
     App_UpdateStatus();
 }
 
+static void SetHistogramChannel(hist_channel_t channel)
+{
+    if (channel < HCH_RGB || channel >= HCH_COUNT)
+        return;
+    g_hist_channel = channel;
+    HistPanel_SetChannel(g_app.hwnd_hist, channel);
+    if (g_menu_view)
+        CheckMenuRadioItem(g_menu_view, IDM_HIST_RGB, IDM_HIST_B,
+                           channel == HCH_RGB ? IDM_HIST_RGB :
+                           (channel == HCH_Y ? IDM_HIST_Y :
+                           (channel == HCH_R ? IDM_HIST_R :
+                           (channel == HCH_G ? IDM_HIST_G : IDM_HIST_B))),
+                           MF_BYCOMMAND);
+}
+
 static void Layout(void)
 {
     RECT client, status_rect;
     int width, height, status_height = 0;
     int table_height, button_height = 28, tabs_height = 28, canvas_height;
-    int available;
+    int available, canvas_width, hist_width = 0;
+    BOOL show_panel;
 
     if (!g_app.hwnd_main || !g_app.hwnd_status || !g_app.hwnd_canvas ||
-        !g_app.hwnd_table || !g_app.hwnd_tabs)
+        !g_app.hwnd_table || !g_app.hwnd_tabs || !g_app.hwnd_hist)
         return;
     SendMessage(g_app.hwnd_status, WM_SIZE, 0, 0);
     GetClientRect(g_app.hwnd_main, &client);
     GetWindowRect(g_app.hwnd_status, &status_rect);
     status_height = status_rect.bottom - status_rect.top;
     width = client.right;
+    show_panel = g_app.show_hist && width >= 520;
+    if (show_panel) {
+        hist_width = HISTPANEL_DEF_WIDTH;
+        if (width - hist_width < 320) {
+            hist_width = width - 320;
+            if (hist_width < HISTPANEL_MIN_WIDTH)
+                hist_width = HISTPANEL_MIN_WIDTH;
+        }
+        if (width - hist_width < 200) {
+            show_panel = FALSE;
+            hist_width = 0;
+        }
+    }
+    canvas_width = width - hist_width;
+    ShowWindow(g_app.hwnd_hist, show_panel ? SW_SHOWNA : SW_HIDE);
+    if (show_panel)
+        App_UpdateHistogram();
     height = client.bottom - status_height;
     if (height < 0)
         height = 0;
@@ -233,8 +356,11 @@ static void Layout(void)
     if (canvas_height < 0)
         canvas_height = 0;
 
-    SetWindowPos(g_app.hwnd_canvas, NULL, 0, 0, width, canvas_height,
+    SetWindowPos(g_app.hwnd_canvas, NULL, 0, 0, canvas_width, canvas_height,
                  SWP_NOZORDER | SWP_NOACTIVATE);
+    if (show_panel)
+        SetWindowPos(g_app.hwnd_hist, NULL, canvas_width, 0, hist_width,
+                     canvas_height, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g_app.hwnd_btn_export, NULL, 8, canvas_height + 2, 78, 24,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g_app.hwnd_btn_clear, NULL, 92, canvas_height + 2, 70, 24,
@@ -261,6 +387,7 @@ static void OpenImageFile(const char *path)
     Image_Free(&g_app.img);
     g_app.img = loaded;
     ROI_Clear(&g_app.rois, &g_app.drag);
+    g_app.img_gen++;
     if (g_app.hwnd_canvas) {
         RECT canvas_rect;
         GetClientRect(g_app.hwnd_canvas, &canvas_rect);
@@ -411,7 +538,7 @@ static void DeleteSelected(void)
 {
     if (g_app.mode == MODE_DRAG && g_app.rois.selected >= 0) {
         ROI_Remove(&g_app.rois, g_app.rois.selected);
-        App_RoiChanged();
+        App_SelectROI(-1);
     }
 }
 
@@ -421,34 +548,68 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
     switch (message) {
     case WM_CREATE: {
         HINSTANCE instance = ((CREATESTRUCTA *)lparam)->hInstance;
+        g_main_wm_create_started = TRUE;
         g_app.hwnd_main = hwnd;
         g_app.hwnd_status = CreateWindowExA(0, STATUSCLASSNAMEA, "",
                                              WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
                                              0, 0, 0, 0, hwnd, (HMENU)2000,
                                              instance, NULL);
+        if (!g_app.hwnd_status) {
+            ReportCreateWindowFailureA("StatusBar");
+            return -1;
+        }
         g_app.hwnd_canvas = CreateWindowExA(0, "RoiAnalyzerCanvas", "",
                                              WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                              0, 0, 0, 0, hwnd, (HMENU)IDC_CANVAS,
                                              instance, NULL);
+        if (!g_app.hwnd_canvas) {
+            ReportCreateWindowFailureA("Canvas");
+            return -1;
+        }
         g_app.hwnd_btn_export = CreateWindowExA(0, "BUTTON", "Export",
                                                   WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                   0, 0, 0, 0, hwnd,
                                                   (HMENU)IDC_EXPORT, instance, NULL);
+        if (!g_app.hwnd_btn_export) {
+            ReportCreateWindowFailureA("Export button");
+            return -1;
+        }
         g_app.hwnd_btn_clear = CreateWindowExA(0, "BUTTON", "Clear",
                                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                 0, 0, 0, 0, hwnd,
                                                 (HMENU)IDC_CLEAR, instance, NULL);
+        if (!g_app.hwnd_btn_clear) {
+            ReportCreateWindowFailureA("Clear button");
+            return -1;
+        }
         g_app.hwnd_chk_multi = CreateWindowExA(0, "BUTTON", "Multi",
                                                 WS_CHILD | WS_VISIBLE |
                                                 BS_AUTOCHECKBOX,
                                                 0, 0, 0, 0, hwnd,
                                                 (HMENU)IDC_MULTI, instance, NULL);
+        if (!g_app.hwnd_chk_multi) {
+            ReportCreateWindowFailureA("Multi checkbox");
+            return -1;
+        }
         g_app.hwnd_tabs = CreateWindowExA(0, WC_TABCONTROLA, "",
                                            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
                                            TCS_TABS,
                                            0, 0, 0, 0, hwnd,
                                            (HMENU)IDC_TABS, instance, NULL);
+        if (!g_app.hwnd_tabs) {
+            ReportCreateWindowFailureA("Tab");
+            return -1;
+        }
+        g_app.hwnd_hist = HistPanel_Create(hwnd, IDC_HISTPANEL);
+        if (!g_app.hwnd_hist) {
+            ReportCreateWindowFailureA("Histogram panel");
+            return -1;
+        }
         g_app.hwnd_table = Table_Create(hwnd, instance, IDC_TABLE);
+        if (!g_app.hwnd_table) {
+            ReportCreateWindowFailureA("ROI table");
+            return -1;
+        }
         if (g_app.hwnd_tabs) {
             TCITEMA tab;
             static const char *const labels[] = { "Drag", "3x3", "5x5" };
@@ -460,10 +621,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
                 TabCtrl_InsertItem(g_app.hwnd_tabs, i, &tab);
             }
         }
-        if (!g_app.hwnd_status || !g_app.hwnd_canvas || !g_app.hwnd_btn_export ||
-            !g_app.hwnd_btn_clear || !g_app.hwnd_chk_multi || !g_app.hwnd_table ||
-            !g_app.hwnd_tabs)
-            return -1;
         DragAcceptFiles(hwnd, TRUE);
         Layout();
         return 0;
@@ -502,10 +659,27 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             OpenLogFile();
         else if (id == IDM_FOLDER)
             OpenImageFolder();
-        else if (id == 2001 && g_app.drag.dragging) {
-            g_app.drag.dragging = FALSE;
-            ReleaseCapture();
-            InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+        else if (id == IDM_HISTOGRAM) {
+            g_app.show_hist = !g_app.show_hist;
+            CheckMenuItem(g_menu_view, IDM_HISTOGRAM,
+                          MF_BYCOMMAND | (g_app.show_hist ? MF_CHECKED : MF_UNCHECKED));
+            Layout();
+            App_UpdateHistogram();
+        } else if (id == IDM_HIST_RGB)
+            SetHistogramChannel(HCH_RGB);
+        else if (id == IDM_HIST_Y)
+            SetHistogramChannel(HCH_Y);
+        else if (id == IDM_HIST_R)
+            SetHistogramChannel(HCH_R);
+        else if (id == IDM_HIST_G)
+            SetHistogramChannel(HCH_G);
+        else if (id == IDM_HIST_B)
+            SetHistogramChannel(HCH_B);
+        else if (id == IDM_HIST_LOG) {
+            g_hist_log = !g_hist_log;
+            CheckMenuItem(g_menu_view, IDM_HIST_LOG,
+                          MF_BYCOMMAND | (g_hist_log ? MF_CHECKED : MF_UNCHECKED));
+            HistPanel_SetLogScale(g_app.hwnd_hist, g_hist_log);
         }
         else if (id == IDC_MULTI && HIWORD(wparam) == BN_CLICKED)
             SetMulti(SendMessage(g_app.hwnd_chk_multi, BM_GETCHECK, 0, 0) ==
@@ -525,10 +699,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             if ((change->uNewState & LVIS_SELECTED) ||
                 ((change->uOldState & LVIS_SELECTED) &&
                  !(change->uNewState & LVIS_SELECTED)))
-                g_app.rois.selected = Table_SelectedGlobalIndex(g_app.hwnd_table);
-            if (g_app.hwnd_canvas)
-                InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
-            App_UpdateStatus();
+                App_SelectROI(Table_SelectedGlobalIndex(g_app.hwnd_table));
+        } else if (header->hwndFrom == g_app.hwnd_hist &&
+                   header->code == HPN_CHANNELCHANGED) {
+            nm_histpanel_t *change = (nm_histpanel_t *)lparam;
+            SetHistogramChannel(change->channel);
+        } else if (header->hwndFrom == g_app.hwnd_hist &&
+                   header->code == HPN_LOGSCALECHANGED) {
+            nm_histpanel_t *change = (nm_histpanel_t *)lparam;
+            g_hist_log = change->log_scale;
+            CheckMenuItem(g_menu_view, IDM_HIST_LOG,
+                          MF_BYCOMMAND | (g_hist_log ? MF_CHECKED : MF_UNCHECKED));
         }
         return 0;
     }
@@ -555,6 +736,7 @@ static HMENU CreateMainMenu(void)
     HMENU mode = CreatePopupMenu();
     HMENU edit = CreatePopupMenu();
     HMENU log = CreatePopupMenu();
+    HMENU view = CreatePopupMenu();
 
     AppendMenuA(file, MF_STRING, IDM_OPEN, "Open...\tO");
     AppendMenuA(file, MF_STRING, IDM_EXPORT, "Export Log\tCtrl+E");
@@ -570,36 +752,37 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(edit, MF_STRING, IDM_CLEAR_ALL, "Clear All ROI\tShift+C");
     AppendMenuA(log, MF_STRING, IDM_OPENLOG, "Open Log File");
     AppendMenuA(log, MF_STRING, IDM_FOLDER, "Open Folder");
+    AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HISTOGRAM, "Histogram Panel\tH");
+    AppendMenuA(view, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HIST_RGB, "Channel: RGB\tA");
+    AppendMenuA(view, MF_STRING, IDM_HIST_Y, "Luminosity (Y)\tY");
+    AppendMenuA(view, MF_STRING, IDM_HIST_R, "Red\tR");
+    AppendMenuA(view, MF_STRING, IDM_HIST_G, "Green\tG");
+    AppendMenuA(view, MF_STRING, IDM_HIST_B, "Blue\tB");
+    AppendMenuA(view, MF_STRING, IDM_HIST_LOG, "Log Scale\tL");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "File");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mode, "Mode");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)edit, "Edit");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "View");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)log, "Log");
     g_menu_mode = mode;
+    g_menu_view = view;
     return bar;
 }
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
                    int show)
 {
-    INITCOMMONCONTROLSEX controls;
     WNDCLASSA wc;
     HMENU menu;
     ACCEL accelerators[] = {
-        { FVIRTKEY, '1', IDM_DRAG },
-        { FVIRTKEY, '2', IDM_GRID3 },
-        { FVIRTKEY, '3', IDM_GRID5 },
-        { FVIRTKEY, 'M', IDM_MULTI },
-        { FVIRTKEY, VK_DELETE, IDM_DELETE },
-        { FVIRTKEY, 'C', IDM_CLEAR },
-        { FVIRTKEY | FSHIFT, 'C', IDM_CLEAR_ALL },
-        { FVIRTKEY, 'O', IDM_OPEN },
-        { FVIRTKEY | FCONTROL, 'E', IDM_EXPORT },
-        { FVIRTKEY, VK_ADD, IDM_ZOOM_IN },
-        { FVIRTKEY, VK_SUBTRACT, IDM_ZOOM_OUT },
-        { FVIRTKEY, VK_OEM_PLUS, IDM_ZOOM_IN },
-        { FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT },
-        { FVIRTKEY | FSHIFT, VK_OEM_PLUS, IDM_ZOOM_IN },
-        { FVIRTKEY, VK_ESCAPE, 2001 }
+        { FVIRTKEY, 'H', IDM_HISTOGRAM },
+        { FVIRTKEY, 'A', IDM_HIST_RGB },
+        { FVIRTKEY, 'Y', IDM_HIST_Y },
+        { FVIRTKEY, 'R', IDM_HIST_R },
+        { FVIRTKEY, 'G', IDM_HIST_G },
+        { FVIRTKEY, 'B', IDM_HIST_B },
+        { FVIRTKEY, 'L', IDM_HIST_LOG }
     };
     MSG msg;
     int screen_width, screen_height, width, height, x, y;
@@ -609,8 +792,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     memset(&g_app, 0, sizeof(g_app));
     g_app.mode = MODE_DRAG;
     g_app.table_page = MODE_DRAG;
+    g_app.show_hist = TRUE;
     g_app.view.zoom = 1.0f;
     ROI_Init(&g_app.rois, &g_app.drag);
+    App_InitCommonControls();
     {
         GdiplusStartupInput input = { 1, NULL, FALSE, FALSE };
         if (GdiplusStartup(&g_gdiplus, &input, NULL) != Ok) {
@@ -619,11 +804,23 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
             return 1;
         }
     }
-    controls.dwSize = sizeof(controls);
-    controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES;
-    if (!InitCommonControlsEx(&controls) || !Canvas_Register(instance)) {
-        MessageBoxA(NULL, "Could not initialize Windows common controls.",
-                    "ROI Analyzer", MB_OK | MB_ICONERROR);
+    if (!Canvas_Register(instance)) {
+        DWORD error = GetLastError();
+        char message[128];
+        snprintf(message, sizeof(message),
+                 "Could not register the Canvas class (GetLastError: %lu).",
+                 (unsigned long)error);
+        MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
+        GdiplusShutdown(g_gdiplus);
+        return 1;
+    }
+    if (!HistPanel_Register(instance)) {
+        DWORD error = GetLastError();
+        char message[128];
+        snprintf(message, sizeof(message),
+                 "Could not register the Histogram class (GetLastError: %lu).",
+                 (unsigned long)error);
+        MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
         GdiplusShutdown(g_gdiplus);
         return 1;
     }
@@ -640,6 +837,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         return 1;
     }
     menu = CreateMainMenu();
+    g_accelerators = CreateAcceleratorTableA(accelerators,
+                            (int)(sizeof(accelerators) / sizeof(accelerators[0])));
     screen_width = GetSystemMetrics(SM_CXSCREEN);
     screen_height = GetSystemMetrics(SM_CYSCREEN);
     width = screen_width > 0 ? screen_width / 2 : 1280;
@@ -650,14 +849,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
                                       "ROI Analyzer", WS_OVERLAPPEDWINDOW,
                                       x, y, width, height, NULL, menu, instance, NULL);
     if (!g_app.hwnd_main) {
-        MessageBoxA(NULL, "Could not create the main window.", "ROI Analyzer",
-                    MB_OK | MB_ICONERROR);
+        if (!g_main_wm_create_started)
+            ReportCreateWindowFailureA("main window");
         ROI_Destroy(&g_app.rois);
         GdiplusShutdown(g_gdiplus);
         return 1;
     }
-    g_accelerators = CreateAcceleratorTableA(accelerators,
-                            (int)(sizeof(accelerators) / sizeof(accelerators[0])));
     ShowWindow(g_app.hwnd_main, show);
     UpdateWindow(g_app.hwnd_main);
     UpdateTitle();

@@ -35,6 +35,7 @@ typedef struct {
 } drag_state_t;
 
 void ROI_Init(roi_list_t *list, drag_state_t *drag);
+void ROI_SetSelected(roi_list_t *list, int index);
 void ROI_Clear(roi_list_t *list, drag_state_t *drag);
 void ROI_ClearSource(roi_list_t *list, roi_source_t source);
 void ROI_Destroy(roi_list_t *list);
