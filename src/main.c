@@ -846,7 +846,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     x = screen_width > 0 ? screen_width / 4 : CW_USEDEFAULT;
     y = screen_height > 0 ? screen_height / 4 : CW_USEDEFAULT;
     g_app.hwnd_main = CreateWindowExA(WS_EX_ACCEPTFILES, "RoiAnalyzerMain",
-                                      "ROI Analyzer", WS_OVERLAPPEDWINDOW,
+                                      "ROI Analyzer",
+                                      WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                       x, y, width, height, NULL, menu, instance, NULL);
     if (!g_app.hwnd_main) {
         if (!g_main_wm_create_started)

@@ -26,6 +26,25 @@ typedef struct {
     RECT ramp;
     RECT stats;
     BOOL tracking;
+    HDC base_dc;
+    HBITMAP base_bmp;
+    HGDIOBJ base_old;
+    void *base_bits;
+    HDC back_dc;
+    HBITMAP back_bmp;
+    HGDIOBJ back_old;
+    HDC ramp_dc;
+    HBITMAP ramp_bmp;
+    HGDIOBJ ramp_old;
+    void *ramp_bits;
+    int buffer_width;
+    int buffer_height;
+    int graph_width;
+    int graph_height;
+    int ramp_width;
+    int ramp_height;
+    BOOL base_dirty;
+    BOOL ramp_dirty;
 } hist_panel_t;
 
 static const char *const g_channel_names[] = {
@@ -140,20 +159,125 @@ static unsigned int bucket_max(const histogram_t *hist, int channel,
     return value;
 }
 
-static void paint_chart(HDC hdc, hist_panel_t *panel)
+static BOOL create_dib_buffer(HDC *dc, HBITMAP *bitmap, HGDIOBJ *old_bitmap,
+                              void **bits, int width, int height)
 {
-    int width = panel->graph.right - panel->graph.left;
-    int height = panel->graph.bottom - panel->graph.top;
     BITMAPINFO bmi;
-    HBITMAP bitmap;
-    void *bits = NULL;
-    HDC memory;
-    HGDIOBJ old_bitmap;
+    void *dib_bits = NULL;
+    *dc = NULL;
+    *bitmap = NULL;
+    *old_bitmap = NULL;
+    if (bits)
+        *bits = NULL;
+    if (width <= 0 || height <= 0)
+        return FALSE;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    *dc = CreateCompatibleDC(NULL);
+    if (!*dc)
+        return FALSE;
+    *bitmap = CreateDIBSection(*dc, &bmi, DIB_RGB_COLORS, &dib_bits, NULL, 0);
+    if (!*bitmap || (bits && !dib_bits)) {
+        if (*bitmap)
+            DeleteObject(*bitmap);
+        DeleteDC(*dc);
+        *dc = NULL;
+        *bitmap = NULL;
+        if (bits)
+            *bits = NULL;
+        return FALSE;
+    }
+    if (bits)
+        *bits = dib_bits;
+    *old_bitmap = SelectObject(*dc, *bitmap);
+    if (!*old_bitmap || *old_bitmap == HGDI_ERROR) {
+        DeleteObject(*bitmap);
+        DeleteDC(*dc);
+        *dc = NULL;
+        *bitmap = NULL;
+        *old_bitmap = NULL;
+        if (bits)
+            *bits = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void delete_dib_buffer(HDC *dc, HBITMAP *bitmap, HGDIOBJ *old_bitmap)
+{
+    if (*dc && *old_bitmap)
+        SelectObject(*dc, *old_bitmap);
+    if (*bitmap)
+        DeleteObject(*bitmap);
+    if (*dc)
+        DeleteDC(*dc);
+    *dc = NULL;
+    *bitmap = NULL;
+    *old_bitmap = NULL;
+}
+
+static BOOL ensure_buffers(hist_panel_t *panel, int client_width,
+                           int client_height)
+{
+    int graph_width = panel->graph.right - panel->graph.left;
+    int graph_height = panel->graph.bottom - panel->graph.top;
+    int ramp_width = panel->ramp.right - panel->ramp.left;
+    int ramp_height = panel->ramp.bottom - panel->ramp.top;
+    if (panel->buffer_width == client_width &&
+        panel->buffer_height == client_height &&
+        panel->graph_width == graph_width &&
+        panel->graph_height == graph_height &&
+        panel->ramp_width == ramp_width &&
+        panel->ramp_height == ramp_height &&
+        panel->back_dc && panel->base_dc && panel->ramp_dc)
+        return TRUE;
+
+    delete_dib_buffer(&panel->base_dc, &panel->base_bmp, &panel->base_old);
+    delete_dib_buffer(&panel->back_dc, &panel->back_bmp, &panel->back_old);
+    delete_dib_buffer(&panel->ramp_dc, &panel->ramp_bmp, &panel->ramp_old);
+    panel->base_bits = NULL;
+    panel->ramp_bits = NULL;
+    if (!create_dib_buffer(&panel->base_dc, &panel->base_bmp,
+                           &panel->base_old, &panel->base_bits,
+                           graph_width, graph_height) ||
+        !create_dib_buffer(&panel->back_dc, &panel->back_bmp,
+                           &panel->back_old, NULL,
+                           client_width, client_height) ||
+        !create_dib_buffer(&panel->ramp_dc, &panel->ramp_bmp,
+                           &panel->ramp_old, &panel->ramp_bits,
+                           ramp_width, ramp_height)) {
+        delete_dib_buffer(&panel->base_dc, &panel->base_bmp, &panel->base_old);
+        delete_dib_buffer(&panel->back_dc, &panel->back_bmp, &panel->back_old);
+        delete_dib_buffer(&panel->ramp_dc, &panel->ramp_bmp, &panel->ramp_old);
+        panel->base_bits = NULL;
+        panel->ramp_bits = NULL;
+        return FALSE;
+    }
+    panel->buffer_width = client_width;
+    panel->buffer_height = client_height;
+    panel->graph_width = graph_width;
+    panel->graph_height = graph_height;
+    panel->ramp_width = ramp_width;
+    panel->ramp_height = ramp_height;
+    panel->base_dirty = TRUE;
+    panel->ramp_dirty = TRUE;
+    return TRUE;
+}
+
+static void paint_chart(hist_panel_t *panel)
+{
+    int width = panel->graph_width;
+    int height = panel->graph_height;
     unsigned int maximum = 0;
-    unsigned int *pixels;
+    unsigned int *pixels = (unsigned int *)panel->base_bits;
     int x, y, ch;
 
-    if (width <= 0 || height <= 0)
+    if (width <= 0 || height <= 0 || !pixels)
         return;
     if (panel->channel == HCH_RGB) {
         for (ch = HIST_R; ch <= HIST_B; ch++)
@@ -162,25 +286,6 @@ static void paint_chart(HDC hdc, hist_panel_t *panel)
     } else {
         maximum = panel->hist.max_bin[current_channel_index(panel->channel)];
     }
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    bitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    memory = CreateCompatibleDC(hdc);
-    if (!bitmap || !memory || !bits) {
-        if (bitmap)
-            DeleteObject(bitmap);
-        if (memory)
-            DeleteDC(memory);
-        FillRect(hdc, &panel->graph, GetSysColorBrush(COLOR_WINDOW));
-        return;
-    }
-    old_bitmap = SelectObject(memory, bitmap);
-    pixels = (unsigned int *)bits;
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++) {
             int level = (int)((long long)x * 256 / width);
@@ -224,25 +329,17 @@ static void paint_chart(HDC hdc, hist_panel_t *panel)
                 dib_color(color);
         }
     }
-    if (panel->hover_level >= 0 && panel->hover_level <= 255) {
-        int hover_x = (int)((long long)panel->hover_level * width / 256);
-        if (hover_x >= width)
-            hover_x = width - 1;
-        for (y = 0; y < height; y++)
-            pixels[(size_t)y * (size_t)width + (size_t)hover_x] =
-                dib_color(RGB(255, 255, 255));
-    }
-    BitBlt(hdc, panel->graph.left, panel->graph.top, width, height,
-           memory, 0, 0, SRCCOPY);
-    SelectObject(memory, old_bitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memory);
+    panel->base_dirty = FALSE;
 }
 
-static void paint_ramp(HDC hdc, const hist_panel_t *panel)
+static void paint_ramp(hist_panel_t *panel)
 {
-    int width = panel->ramp.right - panel->ramp.left;
-    int x;
+    unsigned int *pixels = (unsigned int *)panel->ramp_bits;
+    int width = panel->ramp_width;
+    int height = panel->ramp_height;
+    int x, y;
+    if (width <= 0 || height <= 0 || !pixels)
+        return;
     for (x = 0; x < width; x++) {
         int level = width > 1 ? x * 255 / (width - 1) : 0;
         COLORREF color;
@@ -254,17 +351,10 @@ static void paint_ramp(HDC hdc, const hist_panel_t *panel)
             color = RGB(0, 0, level);
         else
             color = RGB(level, level, level);
-        SetPixelV(hdc, panel->ramp.left + x, panel->ramp.top, color);
-        if (panel->ramp.bottom - panel->ramp.top > 1) {
-            RECT stripe = { panel->ramp.left + x, panel->ramp.top + 1,
-                            panel->ramp.left + x + 1, panel->ramp.bottom };
-            HBRUSH brush = CreateSolidBrush(color);
-            if (brush) {
-                FillRect(hdc, &stripe, brush);
-                DeleteObject(brush);
-            }
-        }
+        for (y = 0; y < height; y++)
+            pixels[(size_t)y * (size_t)width + (size_t)x] = dib_color(color);
     }
+    panel->ramp_dirty = FALSE;
 }
 
 static void paint_stats(HDC hdc, hist_panel_t *panel)
@@ -411,6 +501,8 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
     case WM_SIZE:
         if (panel) {
             update_layout(hwnd, panel);
+            panel->base_dirty = TRUE;
+            panel->ramp_dirty = TRUE;
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -419,12 +511,15 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
             HIWORD(wparam) == CBN_SELCHANGE) {
             panel->channel = (hist_channel_t)SendMessage(panel->combo,
                                                           CB_GETCURSEL, 0, 0);
+            panel->base_dirty = TRUE;
+            panel->ramp_dirty = TRUE;
             InvalidateRect(hwnd, NULL, FALSE);
             notify_channel(hwnd, panel);
         } else if (panel && LOWORD(wparam) == IDC_HIST_LOG &&
                    HIWORD(wparam) == BN_CLICKED) {
             panel->log_scale = SendMessage(panel->log, BM_GETCHECK, 0, 0) ==
                                BST_CHECKED;
+            panel->base_dirty = TRUE;
             InvalidateRect(hwnd, NULL, FALSE);
             notify_log_scale(hwnd, panel);
         }
@@ -441,22 +536,32 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
                 panel->tracking = TrackMouseEvent(&track);
             }
             if (PtInRect(&panel->graph, point)) {
-                panel->hover_level = pointer_level(panel, point.x);
-                if (panel->selecting)
-                    panel->sel_hi = panel->hover_level;
-                InvalidateRect(hwnd, NULL, FALSE);
+                int level = pointer_level(panel, point.x);
+                BOOL selection_changed = panel->selecting &&
+                                         panel->sel_hi != level;
+                if (level == panel->hover_level && !selection_changed)
+                    return 0;
+                panel->hover_level = level;
+                if (selection_changed) {
+                    panel->sel_hi = level;
+                    panel->base_dirty = TRUE;
+                }
+                InvalidateRect(hwnd, &panel->graph, FALSE);
+                InvalidateRect(hwnd, &panel->stats, FALSE);
             } else if (!panel->selecting && panel->hover_level >= 0) {
                 panel->hover_level = -1;
-                InvalidateRect(hwnd, NULL, FALSE);
+                InvalidateRect(hwnd, &panel->graph, FALSE);
+                InvalidateRect(hwnd, &panel->stats, FALSE);
             }
         }
         return 0;
     case WM_MOUSELEAVE:
         if (panel) {
             panel->tracking = FALSE;
-            if (!panel->selecting) {
+            if (!panel->selecting && panel->hover_level != -1) {
                 panel->hover_level = -1;
-                InvalidateRect(hwnd, NULL, FALSE);
+                InvalidateRect(hwnd, &panel->graph, FALSE);
+                InvalidateRect(hwnd, &panel->stats, FALSE);
             }
         }
         return 0;
@@ -467,14 +572,18 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
                 panel->hover_level = pointer_level(panel, point.x);
                 panel->sel_lo = panel->sel_hi = panel->hover_level;
                 panel->selecting = TRUE;
+                panel->base_dirty = TRUE;
                 SetCapture(hwnd);
-                InvalidateRect(hwnd, NULL, FALSE);
+                InvalidateRect(hwnd, &panel->graph, FALSE);
+                InvalidateRect(hwnd, &panel->stats, FALSE);
             }
         }
         return 0;
     case WM_LBUTTONUP:
         if (panel && panel->selecting) {
             int lo, hi;
+            int old_lo = panel->sel_lo;
+            int old_hi = panel->sel_hi;
             POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
             panel->hover_level = pointer_level(panel, point.x);
             panel->sel_hi = panel->hover_level;
@@ -484,18 +593,28 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
             panel->sel_hi = hi;
             panel->selecting = FALSE;
             ReleaseCapture();
-            InvalidateRect(hwnd, NULL, FALSE);
+            if (panel->sel_lo != old_lo || panel->sel_hi != old_hi)
+                panel->base_dirty = TRUE;
+            InvalidateRect(hwnd, &panel->graph, FALSE);
+            InvalidateRect(hwnd, &panel->stats, FALSE);
         }
         return 0;
     case WM_RBUTTONDOWN:
         if (panel) {
             POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
             if (PtInRect(&panel->graph, point)) {
+                BOOL had_selection = panel->sel_lo >= 0 || panel->sel_hi >= 0;
                 panel->sel_lo = -1;
-                InvalidateRect(hwnd, NULL, FALSE);
+                panel->sel_hi = -1;
+                if (had_selection)
+                    panel->base_dirty = TRUE;
+                InvalidateRect(hwnd, &panel->graph, FALSE);
+                InvalidateRect(hwnd, &panel->stats, FALSE);
             }
         }
         return 0;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_PAINT:
         if (panel) {
             PAINTSTRUCT ps;
@@ -503,24 +622,61 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
             RECT rc;
             char source_prefix[] = "Source: ";
             GetClientRect(hwnd, &rc);
-            FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
-            TextOutA(hdc, 8, 32, source_prefix, (int)strlen(source_prefix));
-            if (panel->label[0])
-                TextOutW(hdc, 56, 32, panel->label,
-                         (int)wcslen(panel->label));
-            else
-                TextOutA(hdc, 56, 32, "No image", 8);
-            paint_chart(hdc, panel);
-            paint_ramp(hdc, panel);
-            paint_stats(hdc, panel);
+            if (ensure_buffers(panel, rc.right, rc.bottom)) {
+                if (panel->base_dirty)
+                    paint_chart(panel);
+                if (panel->ramp_dirty)
+                    paint_ramp(panel);
+                FillRect(panel->back_dc, &rc,
+                         GetSysColorBrush(COLOR_WINDOW));
+                SetBkMode(panel->back_dc, TRANSPARENT);
+                SetTextColor(panel->back_dc,
+                             GetSysColor(COLOR_WINDOWTEXT));
+                TextOutA(panel->back_dc, 8, 32, source_prefix,
+                         (int)strlen(source_prefix));
+                if (panel->label[0])
+                    TextOutW(panel->back_dc, 56, 32, panel->label,
+                             (int)wcslen(panel->label));
+                else
+                    TextOutA(panel->back_dc, 56, 32, "No image", 8);
+                BitBlt(panel->back_dc, panel->graph.left, panel->graph.top,
+                       panel->graph_width, panel->graph_height,
+                       panel->base_dc, 0, 0, SRCCOPY);
+                if (panel->hover_level >= 0 &&
+                    panel->hover_level <= 255) {
+                    int hover_x = (int)((long long)panel->hover_level *
+                                        panel->graph_width / 256);
+                    if (hover_x >= panel->graph_width)
+                        hover_x = panel->graph_width - 1;
+                    PatBlt(panel->back_dc, panel->graph.left + hover_x,
+                           panel->graph.top, 1, panel->graph_height, WHITENESS);
+                }
+                BitBlt(panel->back_dc, panel->ramp.left, panel->ramp.top,
+                       panel->ramp_width, panel->ramp_height,
+                       panel->ramp_dc, 0, 0, SRCCOPY);
+                paint_stats(panel->back_dc, panel);
+                if (ps.rcPaint.right > ps.rcPaint.left &&
+                    ps.rcPaint.bottom > ps.rcPaint.top)
+                    BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
+                           ps.rcPaint.right - ps.rcPaint.left,
+                           ps.rcPaint.bottom - ps.rcPaint.top,
+                           panel->back_dc, ps.rcPaint.left, ps.rcPaint.top,
+                           SRCCOPY);
+            } else {
+                FillRect(hdc, &ps.rcPaint, GetSysColorBrush(COLOR_WINDOW));
+            }
             EndPaint(hwnd, &ps);
             return 0;
         }
         break;
     case WM_DESTROY:
         if (panel) {
+            delete_dib_buffer(&panel->base_dc, &panel->base_bmp,
+                              &panel->base_old);
+            delete_dib_buffer(&panel->back_dc, &panel->back_bmp,
+                              &panel->back_old);
+            delete_dib_buffer(&panel->ramp_dc, &panel->ramp_bmp,
+                              &panel->ramp_old);
             free(panel);
             SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
         }
@@ -536,7 +692,7 @@ BOOL HistPanel_Register(HINSTANCE hinst)
     wc.lpfnWndProc = HistPanelWndProc;
     wc.hInstance = hinst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.hbrBackground = NULL;
     wc.lpszClassName = "RoiAnalyzerHistogram";
     return RegisterClassA(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
@@ -546,7 +702,7 @@ HWND HistPanel_Create(HWND parent, int ctrl_id)
     HWND hwnd;
     g_create_failure_reported = FALSE;
     hwnd = CreateWindowExA(WS_EX_CLIENTEDGE, "RoiAnalyzerHistogram", "",
-                           WS_CHILD | WS_CLIPSIBLINGS,
+                           WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                            0, 0, 0, 0, parent, (HMENU)(INT_PTR)ctrl_id,
                            (HINSTANCE)GetWindowLongPtr(parent, GWLP_HINSTANCE),
                            NULL);
@@ -589,6 +745,7 @@ void HistPanel_SetSource(HWND hwnd, const image_t *img, const RECT *rc,
     panel->sel_lo = -1;
     panel->sel_hi = -1;
     panel->hover_level = -1;
+    panel->base_dirty = TRUE;
     InvalidateRect(hwnd, NULL, FALSE);
 }
 
@@ -602,6 +759,7 @@ void HistPanel_ClearSource(HWND hwnd)
     panel->sel_lo = -1;
     panel->sel_hi = -1;
     panel->hover_level = -1;
+    panel->base_dirty = TRUE;
     InvalidateRect(hwnd, NULL, FALSE);
 }
 
@@ -611,6 +769,8 @@ void HistPanel_SetChannel(HWND hwnd, hist_channel_t channel)
     if (!panel || channel < HCH_RGB || channel >= HCH_COUNT)
         return;
     panel->channel = channel;
+    panel->base_dirty = TRUE;
+    panel->ramp_dirty = TRUE;
     SendMessage(panel->combo, CB_SETCURSEL, channel, 0);
     InvalidateRect(hwnd, NULL, FALSE);
 }
@@ -627,6 +787,7 @@ void HistPanel_SetLogScale(HWND hwnd, BOOL on)
     if (!panel)
         return;
     panel->log_scale = on;
+    panel->base_dirty = TRUE;
     SendMessage(panel->log, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
     InvalidateRect(hwnd, NULL, FALSE);
 }
