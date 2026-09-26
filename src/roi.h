@@ -3,36 +3,55 @@
 
 #include <windows.h>
 
-struct view_s;
-typedef struct view_s view_t;
+#include "analyze.h"
+
 struct image_s;
 typedef struct image_s image_t;
+struct view_s;
+typedef struct view_s view_t;
 
-typedef enum { MODE_DRAG, MODE_FIX3, MODE_FIX5 } roi_mode_t;
+typedef enum { MODE_DRAG, MODE_GRID3, MODE_GRID5 } roi_mode_t;
+typedef enum { ROI_SRC_MANUAL, ROI_SRC_GRID3, ROI_SRC_GRID5 } roi_source_t;
 
 typedef struct {
-    roi_mode_t mode;
-    BOOL dragging;      // rubber-banding (MODE_DRAG only)
-    POINT anchor;       // drag start (IMAGE coords, converted at LDown)
-    RECT rubber;        // rubber band (IMAGE coords inclusive: left/top = anchor,
-                        // right/bottom = current; normalized at draw time)
-    RECT confirmed;     // confirmed box, IMAGE coords inclusive: left=x0 top=y0 right=x1 bottom=y1
-    BOOL has_confirmed;
-    POINT preview;      // fixed-mode preview center (image coords)
-    BOOL has_preview;
-} roi_state_t;
+    RECT rc;
+    roi_source_t source;
+    roi_result_t res;
+} roi_item_t;
 
-void ROI_Init(roi_state_t *s);
-void ROI_Clear(roi_state_t *s); // forget confirmed + preview + dragging
-const char *ROI_ModeStr(roi_mode_t m);   // "drag" / "3x3" / "5x5" (log)
-const char *ROI_ModeTitle(roi_mode_t m); // "Drag" / "3x3" / "5x5" (title bar)
-int ROI_FixRadius(roi_mode_t m);         // 0 for DRAG, 1 for FIX3, 2 for FIX5
+typedef struct {
+    roi_item_t *items;
+    int count;
+    int cap;
+    int selected;
+} roi_list_t;
 
-// All take window-coord point; on confirm return TRUE and fill *out_img (inclusive).
-BOOL ROI_OnLDown(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, RECT *out_img);
-BOOL ROI_OnMove(roi_state_t *s, const view_t *v, const image_t *img, POINT wp);
-BOOL ROI_OnLUp(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, RECT *out_img);
+typedef struct {
+    BOOL dragging;
+    BOOL additive;
+    POINT anchor_img;
+    POINT cur_img;
+    POINT down_win;
+} drag_state_t;
 
-void ROI_DrawOverlay(HDC hdc, const view_t *v, const roi_state_t *s);
+void ROI_Init(roi_list_t *list, drag_state_t *drag);
+void ROI_Clear(roi_list_t *list, drag_state_t *drag);
+void ROI_ClearSource(roi_list_t *list, roi_source_t source);
+void ROI_Destroy(roi_list_t *list);
+BOOL ROI_Add(roi_list_t *list, const image_t *img, RECT rc, roi_source_t source);
+BOOL ROI_Remove(roi_list_t *list, int index);
+BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n);
+int ROI_SourceCount(const roi_list_t *list, roi_source_t source);
+int ROI_SourceIndex(const roi_list_t *list, int global_index);
+roi_source_t ROI_ModeSource(roi_mode_t mode);
+int ROI_HitTest(const roi_list_t *list, POINT image_point);
+BOOL ROI_OnLDown(roi_list_t *list, drag_state_t *drag, const image_t *img,
+                 const view_t *view, POINT window_point, BOOL additive);
+BOOL ROI_OnMove(drag_state_t *drag, const image_t *img, const view_t *view,
+                POINT window_point);
+BOOL ROI_OnLUp(roi_list_t *list, drag_state_t *drag, const image_t *img,
+               const view_t *view, POINT window_point, BOOL *was_click);
+const char *ROI_ModeName(roi_mode_t mode);
+const char *ROI_ModeLabel(roi_mode_t mode);
 
 #endif

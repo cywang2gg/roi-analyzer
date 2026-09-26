@@ -1,0 +1,296 @@
+#include "canvas.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <windowsx.h>
+
+#include "app.h"
+
+static BOOL g_panning;
+static POINT g_pan_last;
+
+static void draw_outline(HDC hdc, const RECT *rc, COLORREF color, int width,
+                         int pen_style)
+{
+    HPEN pen = CreatePen(pen_style, width, color);
+    HGDIOBJ old_pen;
+    HGDIOBJ old_brush;
+
+    if (!pen)
+        return;
+    old_pen = SelectObject(hdc, pen);
+    old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, rc->left, rc->top, rc->right, rc->bottom);
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(pen);
+}
+
+static void draw_label(HDC hdc, int x, int y, int number, BOOL centered)
+{
+    char text[16];
+    SIZE size;
+    RECT rc;
+
+    _snprintf(text, sizeof(text), "%d", number);
+    text[sizeof(text) - 1] = '\0';
+    GetTextExtentPoint32A(hdc, text, (int)strlen(text), &size);
+    if (centered) {
+        x -= (size.cx + 6) / 2;
+        y -= (size.cy + 4) / 2;
+    }
+    rc.left = x;
+    rc.top = y;
+    rc.right = x + size.cx + 6;
+    rc.bottom = y + size.cy + 4;
+    SetBkMode(hdc, OPAQUE);
+    SetBkColor(hdc, RGB(0, 0, 0));
+    SetTextColor(hdc, RGB(255, 255, 255));
+    ExtTextOutA(hdc, x + 3, y + 2, ETO_OPAQUE, &rc, text,
+                (UINT)strlen(text), NULL);
+}
+
+static void draw_roi_overlay(HDC hdc)
+{
+    int i, pass;
+
+    if (!g_app.img.valid || g_app.view.scale <= 0.0f)
+        return;
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < g_app.rois.count; i++) {
+            const roi_item_t *item = &g_app.rois.items[i];
+            RECT wr;
+            int number = ROI_SourceIndex(&g_app.rois, i) + 1;
+            BOOL selected = i == g_app.rois.selected;
+            BOOL grid = item->source != ROI_SRC_MANUAL;
+            if (grid != (pass == 0))
+                continue;
+            if (grid && item->source != ROI_ModeSource(g_app.mode))
+                continue;
+            View_RectToWindow(&g_app.view, item->rc, &wr);
+            draw_outline(hdc, &wr,
+                         selected ? RGB(255, 0, 255) :
+                         (grid ? RGB(0, 255, 255) : RGB(255, 255, 0)),
+                         selected ? 3 : (grid ? 1 : 2), PS_SOLID);
+            if (grid) {
+                draw_label(hdc, (wr.left + wr.right) / 2,
+                           (wr.top + wr.bottom) / 2, number, TRUE);
+            } else {
+                int width = wr.right - wr.left;
+                draw_label(hdc, wr.left + 2,
+                           width < 18 ? wr.top - 18 : wr.top + 2,
+                           number, FALSE);
+            }
+        }
+    }
+    if (g_app.drag.dragging) {
+        RECT rc;
+        POINT a = g_app.drag.anchor_img;
+        POINT b = g_app.drag.cur_img;
+        rc.left = a.x < b.x ? a.x : b.x;
+        rc.top = a.y < b.y ? a.y : b.y;
+        rc.right = a.x > b.x ? a.x : b.x;
+        rc.bottom = a.y > b.y ? a.y : b.y;
+        View_RectToWindow(&g_app.view, rc, &rc);
+        draw_outline(hdc, &rc, RGB(255, 255, 255), 1, PS_DOT);
+    }
+}
+
+BOOL Canvas_Register(HINSTANCE instance)
+{
+    WNDCLASSA wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = CanvasWndProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursor(NULL, IDC_CROSS);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = "RoiAnalyzerCanvas";
+    return RegisterClassA(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    switch (message) {
+    case WM_SIZE:
+        View_Update(&g_app.view, LOWORD(lparam), HIWORD(lparam),
+                    g_app.img.valid ? g_app.img.w : 0,
+                    g_app.img.valid ? g_app.img.h : 0, g_app.view.zoom);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_LBUTTONDOWN: {
+        POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        if (!g_app.img.valid)
+            return 0;
+        SetFocus(hwnd);
+        if (g_app.mode == MODE_DRAG) {
+            BOOL additive = g_app.multi || (GetKeyState(VK_CONTROL) & 0x8000);
+            if (ROI_OnLDown(&g_app.rois, &g_app.drag, &g_app.img,
+                            &g_app.view, p, additive)) {
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        } else {
+            POINT ip;
+            if (View_ToImage(&g_app.view, g_app.img.w, g_app.img.h, p, &ip)) {
+                App_SelectROI(ROI_HitTest(&g_app.rois, ip));
+            }
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        if (g_panning) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            View_Pan(&g_app.view, &g_app.img, rc.right, rc.bottom,
+                     p.x - g_pan_last.x, p.y - g_pan_last.y);
+            g_pan_last = p;
+            InvalidateRect(hwnd, NULL, FALSE);
+            App_UpdateStatus();
+            return 0;
+        }
+        if (g_app.drag.dragging &&
+            ROI_OnMove(&g_app.drag, &g_app.img, &g_app.view, p))
+            InvalidateRect(hwnd, NULL, FALSE);
+        App_UpdateStatus();
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        BOOL was_click = FALSE;
+        BOOL had_drag = g_app.drag.dragging;
+        BOOL changed = ROI_OnLUp(&g_app.rois, &g_app.drag, &g_app.img,
+                                 &g_app.view, p, &was_click);
+        if (had_drag) {
+            ReleaseCapture();
+            if (changed && was_click)
+                App_SelectROI(g_app.rois.selected);
+            else
+                App_RoiChanged();
+            if (!changed && !was_click)
+                MessageBoxA(g_app.hwnd_main, "Could not add ROI (out of memory).",
+                            "ROI Analyzer", MB_OK | MB_ICONERROR);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_RBUTTONDOWN:
+        if (g_app.img.valid) {
+            g_panning = TRUE;
+            g_pan_last.x = GET_X_LPARAM(lparam);
+            g_pan_last.y = GET_Y_LPARAM(lparam);
+            SetFocus(hwnd);
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_RBUTTONUP:
+        if (g_panning) {
+            g_panning = FALSE;
+            ReleaseCapture();
+            App_UpdateStatus();
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) {
+            RECT rc;
+            POINT anchor = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+            float zoom = g_app.view.zoom;
+            int steps = GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
+            GetClientRect(hwnd, &rc);
+            ScreenToClient(hwnd, &anchor);
+            while (steps > 0) {
+                zoom *= 1.1f;
+                steps--;
+            }
+            while (steps < 0) {
+                zoom /= 1.1f;
+                steps++;
+            }
+            View_SetZoom(&g_app.view, &g_app.img, rc.right, rc.bottom,
+                         zoom, anchor);
+            InvalidateRect(hwnd, NULL, FALSE);
+            App_UpdateStatus();
+            return 0;
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE && g_app.drag.dragging) {
+            g_app.drag.dragging = FALSE;
+            ReleaseCapture();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        if (wparam == '0') {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            View_Reset(&g_app.view, &g_app.img, rc.right, rc.bottom);
+            InvalidateRect(hwnd, NULL, FALSE);
+            App_UpdateStatus();
+            return 0;
+        }
+        if (wparam == VK_LEFT || wparam == VK_RIGHT ||
+            wparam == VK_UP || wparam == VK_DOWN) {
+            int distance = (GetKeyState(VK_SHIFT) & 0x8000) ? 100 : 20;
+            int dx = 0, dy = 0;
+            RECT rc;
+            if (!g_app.img.valid)
+                return 0;
+            if (wparam == VK_LEFT)
+                dx = -distance;
+            else if (wparam == VK_RIGHT)
+                dx = distance;
+            else if (wparam == VK_UP)
+                dy = -distance;
+            else
+                dy = distance;
+            GetClientRect(hwnd, &rc);
+            View_Pan(&g_app.view, &g_app.img, rc.right, rc.bottom, dx, dy);
+            InvalidateRect(hwnd, NULL, FALSE);
+            App_UpdateStatus();
+            return 0;
+        }
+        break;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        HDC mem;
+        HBITMAP bitmap, old_bitmap;
+        GetClientRect(hwnd, &rc);
+        mem = CreateCompatibleDC(hdc);
+        bitmap = CreateCompatibleBitmap(hdc,
+                                       rc.right > 0 ? rc.right : 1,
+                                       rc.bottom > 0 ? rc.bottom : 1);
+        if (!mem || !bitmap) {
+            if (bitmap)
+                DeleteObject(bitmap);
+            if (mem)
+                DeleteDC(mem);
+            FillRect(hdc, &rc, GetSysColorBrush(COLOR_APPWORKSPACE));
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        old_bitmap = (HBITMAP)SelectObject(mem, bitmap);
+        {
+            HBRUSH background = CreateSolidBrush(RGB(32, 32, 32));
+            if (background) {
+                FillRect(mem, &rc, background);
+                DeleteObject(background);
+            }
+        }
+        if (g_app.img.valid) {
+            View_DrawImage(mem, &g_app.view, &g_app.img);
+            draw_roi_overlay(mem);
+        }
+        BitBlt(hdc, rc.left, rc.top, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old_bitmap);
+        DeleteObject(bitmap);
+        DeleteDC(mem);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    }
+    return DefWindowProc(hwnd, message, wparam, lparam);
+}

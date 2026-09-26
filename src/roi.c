@@ -1,323 +1,304 @@
 #include "roi.h"
 
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "image.h"
 #include "view.h"
 
-void ROI_Init(roi_state_t *s)
+static BOOL point_to_image_clamped(const image_t *img, const view_t *view,
+                                   POINT wp, POINT *ip)
 {
-    if (!s)
-        return;
-    memset(s, 0, sizeof(*s));
-    s->mode = MODE_DRAG;
+    if (View_ToImage(view, img->w, img->h, wp, ip))
+        return TRUE;
+    if (!view || view->scale <= 0.0f || view->draw_w <= 0 || view->draw_h <= 0)
+        return FALSE;
+    ip->x = (int)((float)(wp.x - view->off_x) / view->scale);
+    ip->y = (int)((float)(wp.y - view->off_y) / view->scale);
+    if (ip->x < 0)
+        ip->x = 0;
+    if (ip->y < 0)
+        ip->y = 0;
+    if (ip->x >= img->w)
+        ip->x = img->w - 1;
+    if (ip->y >= img->h)
+        ip->y = img->h - 1;
+    return TRUE;
 }
 
-void ROI_Clear(roi_state_t *s)
+static RECT normalized_rect(POINT a, POINT b)
 {
-    roi_mode_t m;
-
-    if (!s)
-        return;
-    m = s->mode;
-    memset(s, 0, sizeof(*s));
-    s->mode = m;
+    RECT rc;
+    rc.left = a.x < b.x ? a.x : b.x;
+    rc.top = a.y < b.y ? a.y : b.y;
+    rc.right = a.x > b.x ? a.x : b.x;
+    rc.bottom = a.y > b.y ? a.y : b.y;
+    return rc;
 }
 
-const char *ROI_ModeStr(roi_mode_t m)
+void ROI_Init(roi_list_t *list, drag_state_t *drag)
 {
-    switch (m) {
-    case MODE_FIX3:
-        return "3x3";
-    case MODE_FIX5:
-        return "5x5";
+    if (list) {
+        memset(list, 0, sizeof(*list));
+        list->selected = -1;
+    }
+    if (drag)
+        memset(drag, 0, sizeof(*drag));
+}
+
+void ROI_Clear(roi_list_t *list, drag_state_t *drag)
+{
+    if (list) {
+        list->count = 0;
+        list->selected = -1;
+    }
+    if (drag)
+        memset(drag, 0, sizeof(*drag));
+}
+
+void ROI_ClearSource(roi_list_t *list, roi_source_t source)
+{
+    int i, out = 0;
+    int selected_item;
+
+    if (!list)
+        return;
+    selected_item = list->selected;
+    for (i = 0; i < list->count; i++) {
+        if (list->items[i].source != source) {
+            if (out != i)
+                list->items[out] = list->items[i];
+            if (i == selected_item)
+                list->selected = out;
+            out++;
+        } else if (i == selected_item) {
+            list->selected = -1;
+        }
+    }
+    list->count = out;
+}
+
+void ROI_Destroy(roi_list_t *list)
+{
+    if (!list)
+        return;
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+    list->selected = -1;
+}
+
+BOOL ROI_Add(roi_list_t *list, const image_t *img, RECT rc, roi_source_t source)
+{
+    roi_item_t *items;
+    int cap;
+
+    if (!list || !img || !img->valid)
+        return FALSE;
+    if (list->count == list->cap) {
+        if (list->cap > INT_MAX / 2)
+            return FALSE;
+        cap = list->cap ? list->cap * 2 : 8;
+        items = (roi_item_t *)realloc(list->items, (size_t)cap * sizeof(*items));
+        if (!items)
+            return FALSE;
+        list->items = items;
+        list->cap = cap;
+    }
+    AnalyzeROI(img, rc, &list->items[list->count].res);
+    if (list->items[list->count].res.count <= 0)
+        return FALSE;
+    rc.left = list->items[list->count].res.x0;
+    rc.top = list->items[list->count].res.y0;
+    rc.right = list->items[list->count].res.x1;
+    rc.bottom = list->items[list->count].res.y1;
+    list->items[list->count].rc = rc;
+    list->items[list->count].source = source;
+    list->selected = list->count;
+    list->count++;
+    return TRUE;
+}
+
+BOOL ROI_Remove(roi_list_t *list, int index)
+{
+    if (!list || index < 0 || index >= list->count)
+        return FALSE;
+    if (index + 1 < list->count)
+        memmove(&list->items[index], &list->items[index + 1],
+                (size_t)(list->count - index - 1) * sizeof(*list->items));
+    list->count--;
+    if (list->count == 0)
+        list->selected = -1;
+    else if (list->selected == index)
+        list->selected = -1;
+    else if (list->selected > index)
+        list->selected--;
+    return TRUE;
+}
+
+int ROI_SourceCount(const roi_list_t *list, roi_source_t source)
+{
+    int i, count = 0;
+    if (!list)
+        return 0;
+    for (i = 0; i < list->count; i++)
+        if (list->items[i].source == source)
+            count++;
+    return count;
+}
+
+int ROI_SourceIndex(const roi_list_t *list, int global_index)
+{
+    int i, index = 0;
+    roi_source_t source;
+    if (!list || global_index < 0 || global_index >= list->count)
+        return -1;
+    source = list->items[global_index].source;
+    for (i = 0; i < global_index; i++)
+        if (list->items[i].source == source)
+            index++;
+    return index;
+}
+
+roi_source_t ROI_ModeSource(roi_mode_t mode)
+{
+    switch (mode) {
+    case MODE_GRID3:
+        return ROI_SRC_GRID3;
+    case MODE_GRID5:
+        return ROI_SRC_GRID5;
+    case MODE_DRAG:
+    default:
+        return ROI_SRC_MANUAL;
+    }
+}
+
+BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n)
+{
+    int row, col;
+    roi_source_t source;
+
+    if (!list || !img || !img->valid || (n != 3 && n != 5))
+        return FALSE;
+    source = n == 3 ? ROI_SRC_GRID3 : ROI_SRC_GRID5;
+    ROI_ClearSource(list, source);
+    if (img->w < n || img->h < n)
+        return FALSE;
+    for (row = 0; row < n; row++) {
+        int y0 = (int)(((long long)row * img->h) / n);
+        int y1 = (int)(((long long)(row + 1) * img->h) / n) - 1;
+        for (col = 0; col < n; col++) {
+            RECT rc;
+            rc.left = (int)(((long long)col * img->w) / n);
+            rc.right = (int)(((long long)(col + 1) * img->w) / n) - 1;
+            rc.top = y0;
+            rc.bottom = y1;
+            if (!ROI_Add(list, img, rc, source)) {
+                ROI_ClearSource(list, source);
+                return FALSE;
+            }
+        }
+    }
+    list->selected = -1;
+    return TRUE;
+}
+
+int ROI_HitTest(const roi_list_t *list, POINT p)
+{
+    int i;
+
+    if (!list)
+        return -1;
+    for (i = list->count - 1; i >= 0; i--) {
+        const RECT *rc = &list->items[i].rc;
+        if (p.x >= rc->left && p.x <= rc->right &&
+            p.y >= rc->top && p.y <= rc->bottom)
+            return i;
+    }
+    return -1;
+}
+
+BOOL ROI_OnLDown(roi_list_t *list, drag_state_t *drag, const image_t *img,
+                 const view_t *view, POINT wp, BOOL additive)
+{
+    POINT ip;
+
+    if (!list || !drag || !img || !img->valid ||
+        !View_ToImage(view, img->w, img->h, wp, &ip))
+        return FALSE;
+    drag->dragging = TRUE;
+    drag->additive = additive;
+    drag->anchor_img = ip;
+    drag->cur_img = ip;
+    drag->down_win = wp;
+    return TRUE;
+}
+
+BOOL ROI_OnMove(drag_state_t *drag, const image_t *img, const view_t *view,
+                POINT wp)
+{
+    POINT ip;
+
+    if (!drag || !drag->dragging || !img || !img->valid ||
+        !point_to_image_clamped(img, view, wp, &ip))
+        return FALSE;
+    if (ip.x == drag->cur_img.x && ip.y == drag->cur_img.y)
+        return FALSE;
+    drag->cur_img = ip;
+    return TRUE;
+}
+
+BOOL ROI_OnLUp(roi_list_t *list, drag_state_t *drag, const image_t *img,
+               const view_t *view, POINT wp, BOOL *was_click)
+{
+    POINT end;
+    long long dx, dy;
+    BOOL click;
+
+    if (!list || !drag || !drag->dragging || !img || !img->valid)
+        return FALSE;
+    if (!point_to_image_clamped(img, view, wp, &end))
+        end = drag->cur_img;
+    dx = wp.x - drag->down_win.x;
+    dy = wp.y - drag->down_win.y;
+    click = dx * dx + dy * dy < 9;
+    drag->cur_img = end;
+    drag->dragging = FALSE;
+    if (was_click)
+        *was_click = click;
+    if (click) {
+        list->selected = ROI_HitTest(list, end);
+        return TRUE;
+    }
+    if (!drag->additive) {
+        ROI_ClearSource(list, ROI_SRC_MANUAL);
+    }
+    return ROI_Add(list, img, normalized_rect(drag->anchor_img, end),
+                   ROI_SRC_MANUAL);
+}
+
+const char *ROI_ModeName(roi_mode_t mode)
+{
+    switch (mode) {
+    case MODE_GRID3:
+        return "grid3x3";
+    case MODE_GRID5:
+        return "grid5x5";
     case MODE_DRAG:
     default:
         return "drag";
     }
 }
 
-const char *ROI_ModeTitle(roi_mode_t m)
+const char *ROI_ModeLabel(roi_mode_t mode)
 {
-    switch (m) {
-    case MODE_FIX3:
+    switch (mode) {
+    case MODE_GRID3:
         return "3x3";
-    case MODE_FIX5:
+    case MODE_GRID5:
         return "5x5";
     case MODE_DRAG:
     default:
         return "Drag";
-    }
-}
-
-int ROI_FixRadius(roi_mode_t m)
-{
-    switch (m) {
-    case MODE_FIX3:
-        return 1;
-    case MODE_FIX5:
-        return 2;
-    case MODE_DRAG:
-    default:
-        return 0;
-    }
-}
-
-#define ROI_FIX_MIN_PX 9  /* min on-screen side for fixed 3x3/5x5 overlay */
-
-/* Forward: used by ROI_OnMove drag throttle, defined after ROI_OnLUp. */
-static void img_rect_to_window(const view_t *v, RECT img_rc, RECT *win_rc);
-
-static void clamp_pt(POINT *p, int w, int h)
-{
-    if (p->x < 0)
-        p->x = 0;
-    if (p->y < 0)
-        p->y = 0;
-    if (p->x >= w)
-        p->x = w - 1;
-    if (p->y >= h)
-        p->y = h - 1;
-}
-
-BOOL ROI_OnLDown(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, RECT *out_img)
-{
-    POINT ip;
-    int r;
-
-    if (!s || !v || !img || !img->valid)
-        return FALSE;
-    if (!View_ToImage(v, img->w, img->h, wp, &ip))
-        return FALSE; /* pressed outside the image: ignore */
-
-    if (s->mode == MODE_DRAG) {
-        /* ip already converted above; store in IMAGE coords so the rubber
-           band follows window resizes (overlay reconverts per paint). */
-        s->dragging = TRUE;
-        s->anchor = ip;
-        s->rubber.left = s->rubber.right = ip.x;
-        s->rubber.top = s->rubber.bottom = ip.y;
-        s->has_preview = FALSE;
-        return FALSE; /* confirm on LUp */
-    }
-
-    /* Fixed modes: center clamped so the box always fits fully inside. */
-    r = ROI_FixRadius(s->mode);
-    if (ip.x < r)
-        ip.x = r;
-    if (ip.y < r)
-        ip.y = r;
-    if (ip.x > img->w - 1 - r)
-        ip.x = img->w - 1 - r;
-    if (ip.y > img->h - 1 - r)
-        ip.y = img->h - 1 - r;
-    s->preview = ip;
-    s->has_preview = FALSE; /* clicked: becomes confirmed, not preview */
-    s->confirmed.left = ip.x - r;
-    s->confirmed.top = ip.y - r;
-    s->confirmed.right = ip.x + r;
-    s->confirmed.bottom = ip.y + r;
-    s->has_confirmed = TRUE;
-    if (out_img)
-        *out_img = s->confirmed;
-    return TRUE;
-}
-
-BOOL ROI_OnMove(roi_state_t *s, const view_t *v, const image_t *img, POINT wp)
-{
-    POINT ip;
-    int r;
-
-    if (!s || !v || !img || !img->valid)
-        return FALSE;
-
-    if (s->mode == MODE_DRAG) {
-        if (!s->dragging)
-            return FALSE;
-        /* Convert to image coords so the rubber band survives resizes;
-           clamp at the edges (mirror ROI_OnLUp) for live feedback. */
-        if (!View_ToImage(v, img->w, img->h, wp, &ip)) {
-            ip.x = wp.x - v->off_x;
-            ip.y = wp.y - v->off_y;
-            ip.x = v->scale > 0.0f ? (int)((float)ip.x / v->scale) : 0;
-            ip.y = v->scale > 0.0f ? (int)((float)ip.y / v->scale) : 0;
-            clamp_pt(&ip, img->w, img->h);
-        }
-        if (ip.x == s->rubber.right && ip.y == s->rubber.bottom)
-            return FALSE; /* same cell: no repaint, no flicker */
-        /* Throttle: skip repaint when the normalized rubber rect maps to
-           the same window rect (sub-screen-pixel change). */
-        {
-            RECT old_img, new_img, old_wr, new_wr;
-            old_img.left = (s->anchor.x < s->rubber.right) ? s->anchor.x : s->rubber.right;
-            old_img.top = (s->anchor.y < s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
-            old_img.right = (s->anchor.x > s->rubber.right) ? s->anchor.x : s->rubber.right;
-            old_img.bottom = (s->anchor.y > s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
-            new_img.left = (s->anchor.x < ip.x) ? s->anchor.x : ip.x;
-            new_img.top = (s->anchor.y < ip.y) ? s->anchor.y : ip.y;
-            new_img.right = (s->anchor.x > ip.x) ? s->anchor.x : ip.x;
-            new_img.bottom = (s->anchor.y > ip.y) ? s->anchor.y : ip.y;
-            img_rect_to_window(v, old_img, &old_wr);
-            img_rect_to_window(v, new_img, &new_wr);
-            s->rubber.right = ip.x;
-            s->rubber.bottom = ip.y;
-            if (EqualRect(&old_wr, &new_wr))
-                return FALSE;
-            return TRUE;
-        }
-    }
-
-    if (!View_ToImage(v, img->w, img->h, wp, &ip))
-        return FALSE;
-    r = ROI_FixRadius(s->mode);
-    if (ip.x < r)
-        ip.x = r;
-    if (ip.y < r)
-        ip.y = r;
-    if (ip.x > img->w - 1 - r)
-        ip.x = img->w - 1 - r;
-    if (ip.y > img->h - 1 - r)
-        ip.y = img->h - 1 - r;
-    /* Fixed modes: repaint only when the SCREEN center moves. At scale<1
-       several image cells collapse to one screen px; repainting per
-       image cell causes jitter repaints with no visible change. */
-    {
-        POINT wc_new, wc_old;
-        BOOL had = s->has_preview;
-        POINT old = s->preview;
-        View_ToWindow(v, ip, &wc_new);
-        s->preview = ip;
-        s->has_preview = TRUE;
-        if (had) {
-            if (ip.x == old.x && ip.y == old.y)
-                return FALSE; /* same cell */
-            View_ToWindow(v, old, &wc_old);
-            if (wc_new.x == wc_old.x && wc_new.y == wc_old.y)
-                return FALSE; /* same screen px: state tracked, no repaint */
-        }
-        return TRUE;
-    }
-}
-
-BOOL ROI_OnLUp(roi_state_t *s, const view_t *v, const image_t *img, POINT wp, RECT *out_img)
-{
-    POINT a, b;
-
-    if (!s || !v || !img || !img->valid)
-        return FALSE;
-    if (s->mode != MODE_DRAG || !s->dragging)
-        return FALSE;
-    s->dragging = FALSE;
-    (void)v;
-    (void)wp;
-
-    /* Anchor/rubber are stored in IMAGE coords: normalize + clamp. */
-    a = s->anchor;
-    b.x = s->rubber.right;
-    b.y = s->rubber.bottom;
-    clamp_pt(&a, img->w, img->h);
-    clamp_pt(&b, img->w, img->h);
-
-    s->confirmed.left = (a.x < b.x) ? a.x : b.x;
-    s->confirmed.top = (a.y < b.y) ? a.y : b.y;
-    s->confirmed.right = (a.x > b.x) ? a.x : b.x;
-    s->confirmed.bottom = (a.y > b.y) ? a.y : b.y;
-    s->has_confirmed = TRUE;
-    if (out_img)
-        *out_img = s->confirmed;
-    return TRUE; /* minimum box is 1x1 (a == b) */
-}
-
-/* Image-coord inclusive rect -> window rect (exclusive, for drawing). */
-static void img_rect_to_window(const view_t *v, RECT img_rc, RECT *win_rc)
-{
-    POINT p0, p1;
-
-    p0.x = img_rc.left;
-    p0.y = img_rc.top;
-    p1.x = img_rc.right + 1; /* exclusive edge */
-    p1.y = img_rc.bottom + 1;
-    View_ToWindow(v, p0, &p0);
-    View_ToWindow(v, p1, &p1);
-    win_rc->left = p0.x;
-    win_rc->top = p0.y;
-    win_rc->right = p1.x;
-    win_rc->bottom = p1.y;
-}
-
-static void draw_rect_outline(HDC hdc, const RECT *rc, COLORREF color)
-{
-    HPEN pen = CreatePen(PS_SOLID, 2, color);
-    HGDIOBJ old_pen;
-    HGDIOBJ old_brush;
-
-    if (!pen)
-        return;
-    old_pen = SelectObject(hdc, pen);
-    old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, rc->left, rc->top, rc->right, rc->bottom);
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    DeleteObject(pen);
-}
-
-/* Fixed-mode image center -> window rect, min on-screen size enforced.
-   Storage stays image coords; only the DRAWN rect is enlarged so the box
-   remains visible when scale<1. Data/log path untouched. */
-static void fixed_win_rect(const view_t *v, POINT center_img, int r, RECT *out)
-{
-    POINT c;
-    int side_img = 2 * r + 1; /* 3 or 5 */
-    int side_scr = (int)((float)side_img * v->scale + 0.5f);
-    if (side_scr < ROI_FIX_MIN_PX)
-        side_scr = ROI_FIX_MIN_PX;
-    View_ToWindow(v, center_img, &c);
-    out->left = c.x - side_scr / 2;
-    out->top = c.y - side_scr / 2;
-    out->right = out->left + side_scr;
-    out->bottom = out->top + side_scr;
-}
-
-void ROI_DrawOverlay(HDC hdc, const view_t *v, const roi_state_t *s)
-{
-    RECT wr;
-    POINT ctr;
-    int w;
-
-    if (!hdc || !v || !s)
-        return;
-
-    if (s->has_confirmed) {
-        if (s->mode != MODE_DRAG) {
-            /* Fixed confirm: recover r from stored square size (3/5). */
-            w = s->confirmed.right - s->confirmed.left + 1;
-            ctr.x = (s->confirmed.left + s->confirmed.right) / 2;
-            ctr.y = (s->confirmed.top + s->confirmed.bottom) / 2;
-            fixed_win_rect(v, ctr, (w >= 5) ? 2 : 1, &wr);
-        } else {
-            img_rect_to_window(v, s->confirmed, &wr); /* drag: exact */
-        }
-        draw_rect_outline(hdc, &wr, RGB(255, 255, 0)); /* confirmed: yellow */
-    }
-
-    if (s->mode != MODE_DRAG && s->has_preview && !s->dragging) {
-        RECT prv_wr;
-        fixed_win_rect(v, s->preview, ROI_FixRadius(s->mode), &prv_wr);
-        /* If preview sits exactly on the confirmed box, skip it: same
-           rect drawn white-after-yellow would hide the yellow confirm. */
-        if (!(s->has_confirmed && s->mode != MODE_DRAG && EqualRect(&prv_wr, &wr)))
-            draw_rect_outline(hdc, &prv_wr, RGB(255, 255, 255)); /* preview: white */
-    }
-
-    if (s->dragging) {
-        /* Rubber band is IMAGE coords: reconvert via the current view so
-           it tracks window resizes like the confirmed box. */
-        RECT img_rc;
-        img_rc.left = (s->anchor.x < s->rubber.right) ? s->anchor.x : s->rubber.right;
-        img_rc.top = (s->anchor.y < s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
-        img_rc.right = (s->anchor.x > s->rubber.right) ? s->anchor.x : s->rubber.right;
-        img_rc.bottom = (s->anchor.y > s->rubber.bottom) ? s->anchor.y : s->rubber.bottom;
-        img_rect_to_window(v, img_rc, &wr);
-        draw_rect_outline(hdc, &wr, RGB(255, 255, 255)); /* rubber band: white */
     }
 }
