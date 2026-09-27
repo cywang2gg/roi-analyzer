@@ -2,13 +2,15 @@
 
 ---
 
-# CompareForm 移植架構書（roi_analyzer v2.7 定稿，2026-09-27）
+# CompareForm 移植架構書（roi_analyzer v2.7 增補，2026-09-27）
 
 > 將 C# `CompareForm`（V1 並排）與 `CompareFormV2`（V2 分割線疊加）移植到 roi_analyzer。維持純 C＋Win32＋GDI、ANSI 建置、無第三方依賴。
-> 實作約 2200 行（compare.h 72／compare_image.c 147／compare_core.c 262／compare_v1.c 857／compare_v2.c 835，另 main.c +304、image.c +27）。與主程式共用 `Image_Load`（WIC→GDI+）與 `view_pyr` 金字塔，其餘自成模組。
-> v2.7 定稿修正 C1～C10（見 §12 後的「定稿附錄」）取代草案對應段落；`Report` 延後（P5 保留設計）。
+> 實作約 3200 行（compare.h 123／compare_image.c 155／compare_core.c 437／compare_snap.c 492／compare_v1.c 1009／compare_v2.c 1017，另 main.c 增補約 340、export.c +19）。與主程式共用 `Image_Load`（WIC→GDI+）與 `view_pyr` 金字塔，其餘自成模組。
+> v2.7 定稿修正 C1～C10（見 §13 定稿附錄）取代草案對應段落；v2.7 增補（§14 主視窗多檔拖放＋Snapshot、拍板 S1～S7、T1～T3、C11）。`Report` 延後（P6 保留設計）。
 
 ## 變更歷史
+
+- **v2.7 增補（2026-09-27）**：主視窗多檔拖放（§14.1；`CmpDrop_Collect`、`cmp_open_mode_t`、S1＋S2＋S3、T2 附註、T3 目前）與 Snapshot（§14.2；`compare_snap.c`、S4～S7、T1 `Info bar`）。C11 路徑拆解 DBCS 安全（`export.c` 一併修正）。增補行數以實作檔案為準（見上）。
 
 - **v2.7 定稿（2026-09-27）**：P0～P4 實作完成。`Image_Clone`；V1（2～4 張並排，Lock 同步）；V2（疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像上限 `CMP_MAX_LIVE_IMG=8` 預先檢查；拖放用 `DragQueryFileW`＋嚴格 ACP；主迴圈加速鍵包覆 `root==main`（C6）；IDM 155／156；直方圖 ID 移至 161～166。V2 控制列改為比例式（Zoom 佔半、Pan／Actions 平分剩餘）。
 - **v2.7（本草案）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加，可拖曳分割線、`Swap`、各自倍率）。影像以參考計數共享。統一「視口中心影像座標」模型。修正 C# 版縮放量化卡死、fit 溢出、分割線不隨縮放等問題。`Report` 延後。
@@ -1269,3 +1271,26 @@ static BOOL wide_to_acp_strict(const WCHAR *w, char *out, int cap)
 ### C10：V2 雙擊的副作用
 
 `WM_LBUTTONDBLCLK` 只呼叫 `v2_fit_views`（fit 0.95＋置中），不動 `swap`／`split_mode`／`sync_pan`／`pan_side`／`split_frac`。移線模式下雙擊的第一下 `WM_LBUTTONDOWN` 已把分割線移到游標位置，因此雙擊後分割線會停在點擊處，屬預期行為（已於程式註解說明，不另做補償）。
+---
+
+## 14. v2.7 增補：主視窗多檔拖放＋Snapshot（已實作）
+
+沿用 v2.7 定稿與 C1～C10；拍板 S1～S7、T1～T3；新增 C11。驗收以 ad-hoc 檢查為準（25/27 通過，2 項為檢查字串與實作等價做法的差異：剪貼簿用 `CF_BITMAP` 而非 `CF_DIB`，WIC 用 `WICBitmapIgnoreAlpha` 而非逐像素補 0xFF）。
+
+### 14.1 主視窗多檔拖放（S1＋S2＋S3、T2、T3）
+
+- 分流（`main.c` `App_OnDropFiles`）：0 張→狀態列提示各類略過數；1 張（不按 `Ctrl`）→既有單檔載入；≥2 張（不按 `Ctrl`）→主視窗以既有完整流程載入自然排序第一張（清除 ROI、切換檔案清單；若第一張即目前影像則不重載、ROI 保留），V1 開啟全部拖入檔案（T3 目前：先載主視窗再開 V1）；按住 `Ctrl` 放開滑鼠＋有目前影像→`CMP_OPEN_WITH_CURRENT`（V1 含目前影像，主視窗不變；1 張也開 V1）。
+- `Ctrl` 用 `GetAsyncKeyState` 判斷（拖放時前景是檔案總管，`GetKeyState` 不準）；上限檢查在主視窗載入前進行（上限到達仍載入第一張＋提示）；T2 替代：不按 `Ctrl` 拖入多張後訊息附註「Ctrl+drop to include current image」。
+- 共用收集 `CmpDrop_Collect`（`compare_core.c`，`Ctrl+K`、主視窗拖放、V1 拖放三入口共用；`wide_to_acp_strict` 由 V1 移至此處並加 `GetACP()==CP_UTF8` 分支）：W 版取路徑→略過目錄→副檔名過濾（png/jpg/jpeg/bmp）→自然排序（`StrCmpLogicalW`）→去重→嚴格 ACP→取前 4，統計 `cmp_drop_stats_t`（total/dirs/bad_ext/non_acp/dup/over/truncated）。`GetFileAttributesW` 不觸發雲端下載，真正下載在 `CmpImage_Load`（狀態列 `Loading i/n…`）。S1 不重複解碼：V1 第一格以 `CmpImage_FromImage` 從主視窗複製。退回：只有 1 張成功時該張顯示在主視窗。
+
+### 14.2 Snapshot（S4～S7、T1）
+
+- 繪製重構：V1／V2 的 `WM_PAINT` 拆為 `v1_render(s,dc,w,h,flags)`／`v2_render(…)`＋貼上畫面；Snapshot 呼叫同一渲染函式（`CMP_RENDER_SNAPSHOT` 不畫關閉鈕與 hover），僅限參數 `w×h` 範圍填底色，不可用 `GetClientRect`（否則蓋掉資訊列區）。V1 Snapshot 含格線＋每格狀態帶（加格號 `[1]`～`[4]`，與資訊列對應），V2 含分割線＋A/B 標籤（含倍率如 `A: a.jpg 35%`）；像素讀值（狀態列）不入圖。
+- `compare_snap.c`（492 行）：`CmpSnap_Begin`（`CreateCompatibleBitmap` 相容點陣）、`CmpSnap_Finalize`（僅 deselect＋DeleteDC）、`CmpSnap_End`、`snap_encode`（WIC `CreateBitmapFromHBITMAP`＋`WICBitmapIgnoreAlpha`＋PNG 編碼；實作等價於逐像素補 alpha，輸出不透明）、`CmpSnap_CopyToClipboard`（`CopyImage(LR_CREATEDIBSECTION)`＋`CF_BITMAP`，`OpenClipboard` 重試 5 次；小畫家／Word 可貼，實作等價於 `CF_DIB`）、`CmpSnap_MakePath`／`CmpSnap_SavePng`／`CmpSnap_Deliver`／`cmp_save_as_dialog`、`CmpInfo_Add/Height/Draw`、`CmpView_VisibleRect` 在 `compare_core.c`、`Cmp_UiFont`。
+- S4 目前：位置＝影像所在資料夾（`snap_ref_directory`：`PathRemoveFileSpecA`＋目錄屬性驗證；無效時 fallback 既有 Pictures 邏輯），V1 取第 0 格、V2 取畫面左側；檔名 `snap_<A>_vs_<B>_yyyymmdd-hhmmss[_k].png`（A/B 主檔名以 `CharNextA` 逐字截 32 位元組，DBCS 安全；`_k` 防覆寫，沿用既有 suffix 迴圈語意）。
+- S5 目前：畫布客戶區 1:1；S6 替代（資訊列，不寫 `tEXt`——`tEXt` 僅 Latin-1，中文 ANSI 會違規）：底部資訊列（字高＋4／行＋8 邊距），只有輸出圖有；V1 約 5 行（標題：程式名｜時間｜Lock｜張數｜畫布尺寸；每格 `[i] 倍率｜src 可見區｜原尺寸｜路徑`）、V2 約 3 行（split／swap／sync／pan target；`L = A`／`R = B` 兩行）；`src` 可見區由 `CmpView_VisibleRect`（與 `Cmp_Blit` 同算法）得出，可對應主視窗 ROI；路徑放行尾以 `DT_PATH_ELLIPSIS` 省略中段；尺寸用 ASCII `x`；時間與檔名同一 `SYSTEMTIME`。T1 替代：V1／V2 工具列 `Info bar` 核取方塊（預設勾選；關閉時 Snapshot 尺寸＝畫布尺寸）。
+- S7 替代：按鈕＋`Ctrl+S` 存檔的同時複製（先複製後存檔；對話框取消剪貼簿仍有圖）；`Ctrl+Shift+S` 另存＋複製；`Ctrl+C` 只複製。成功訊息寫既有訊息欄（V1 `state->message`、V2 狀態列：`Saved <檔名> + clipboard`），不彈成功窗；存檔與複製都失敗才 MessageBox。`CMPM_KEY` 開頭取 `ctrl/shift`，單鍵 `S/M/P/L/V/0/+/-` 只在無 `Ctrl` 時生效（C6 保證不落到主視窗）。
+
+### 14.3 C11：DBCS 路徑的反斜線判斷
+
+ANSI 建置下 Big5（CP950）／Shift-JIS 雙位元組字元的第二位元組可為 0x5C（如「許功蓋」），`strrchr(path,'\')` 會在字元中間切斷。比較模組路徑拆解一律改用 shlwapi（`PathFindFileNameA`／`PathFindExtensionA`／`PathRemoveFileSpecA`），截斷以 `CharNextA` 逐字前進；`export.c` 的 `<主檔>_…log` 命名同步修正（`strrchr`→shlwapi）。

@@ -5,6 +5,7 @@
 #include <gdiplus/gdiplus.h>
 #include <limits.h>
 #include <objbase.h>
+#include <shlwapi.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -86,6 +87,9 @@ static void UpdateTitle(void);
 static void App_UpdateTable(void);
 static void CompareFilesDialog(void);
 static void CompareCurrentWithNext(void);
+static BOOL App_CompareOpenPaths(char paths[CMP_MAX_CELLS][MAX_PATH],
+                                 int count, cmp_open_mode_t mode);
+static void App_OnDropFiles(HDROP drop);
 
 static BOOL copy_utf8_to_acp(char *destination, size_t capacity,
                              const char *source)
@@ -134,14 +138,8 @@ static void ReportCreateWindowFailureA(const char *control)
 
 static const char *image_basename(const char *path)
 {
-    const char *base = path;
-    const char *slash = strrchr(path, '\\');
-    const char *forward = strrchr(path, '/');
-    if (slash && slash + 1 > base)
-        base = slash + 1;
-    if (forward && forward + 1 > base)
-        base = forward + 1;
-    return base;
+    const char *base = PathFindFileNameA(path);
+    return base ? base : path;
 }
 
 static void UpdateTitle(void)
@@ -766,17 +764,17 @@ static void Layout(void)
                  width, table_height - tabs_height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void OpenImageFile(const char *path)
+static BOOL OpenImageFile(const char *path)
 {
     image_t loaded;
     memset(&loaded, 0, sizeof(loaded));
     if (!path || !path[0])
-        return;
+        return FALSE;
     App_FlushPending();
     if (Image_Load(&loaded, path) != 0) {
         MessageBoxA(g_app.hwnd_main, "Cannot load image (PNG/JPG/BMP only).",
                     "Open", MB_OK | MB_ICONWARNING);
-        return;
+        return FALSE;
     }
     Image_Free(&g_app.img);
     g_app.img = loaded;
@@ -832,6 +830,147 @@ static void OpenImageFile(const char *path)
     UpdateTitle();
     App_StatusSetIndex();
     App_RoiChanged();
+    return TRUE;
+}
+
+static BOOL App_CompareOpenPaths(char paths[CMP_MAX_CELLS][MAX_PATH],
+                                 int path_count, cmp_open_mode_t mode)
+{
+    cmp_image_t *images[CMP_MAX_CELLS] = { NULL, NULL, NULL, NULL };
+    char previous_status[sizeof(g_nav_status)];
+    int count = 0, i, failures = 0, non_acp = 0, limit_reached = 0;
+    HCURSOR old_cursor;
+    BOOL opened = FALSE;
+
+    if (!paths || path_count <= 0)
+        return FALSE;
+    App_FlushPending();
+    lstrcpynA(previous_status, g_nav_status,
+              (int)sizeof(previous_status));
+    if (mode == CMP_OPEN_MAIN_FIRST) {
+        if (!OpenImageFile(paths[0]))
+            return FALSE;
+        lstrcpynA(previous_status, g_nav_status,
+                  (int)sizeof(previous_status));
+    }
+    if (!Compare_CanOpen(1)) {
+        MessageBoxA(g_app.hwnd_main,
+                    "The comparison image limit (8) is reached.",
+                    "Compare Files", MB_OK | MB_ICONWARNING);
+        return FALSE;
+    }
+    strcpy(g_nav_status, "Loading comparison images...");
+    App_UpdateStatus();
+    UpdateWindow(g_app.hwnd_status);
+    old_cursor = SetCursor(LoadCursor(NULL, IDC_WAIT));
+
+    if (mode == CMP_OPEN_WITH_CURRENT && g_app.img.valid) {
+        images[count] = CmpImage_FromImage(&g_app.img);
+        if (images[count])
+            count++;
+        else
+            failures++;
+    }
+    for (i = 0; i < path_count && count < CMP_MAX_CELLS; i++) {
+        cmp_image_t *image;
+        int j;
+        if (!paths[i][0] || strchr(paths[i], '?')) {
+            non_acp++;
+            continue;
+        }
+        if (mode == CMP_OPEN_WITH_CURRENT && g_app.img.valid &&
+            lstrcmpiA(paths[i], g_app.img.path) == 0)
+            continue;
+        for (j = 0; j < count; j++)
+            if (lstrcmpiA(paths[i], images[j]->img.path) == 0)
+                break;
+        if (j < count)
+            continue;
+        if (!Compare_CanOpen(1)) {
+            limit_reached = 1;
+            break;
+        }
+        image = CmpImage_Load(paths[i]);
+        if (!image) {
+            failures++;
+            continue;
+        }
+        images[count++] = image;
+    }
+    if (i < path_count && count >= CMP_MAX_CELLS)
+        limit_reached = 1;
+    SetCursor(old_cursor);
+    lstrcpynA(g_nav_status, previous_status, (int)sizeof(g_nav_status));
+    App_UpdateStatus();
+    if (count >= 2) {
+        if (!CompareV1_Open(images, count))
+            MessageBoxA(g_app.hwnd_main,
+                        "Could not create the comparison window.",
+                        "Compare Files", MB_OK | MB_ICONERROR);
+        else
+            opened = TRUE;
+    } else if (mode == CMP_OPEN_WITH_CURRENT || path_count > 1) {
+        MessageBoxA(g_app.hwnd_main,
+                    "Select at least two readable images (the current image is included automatically).",
+                    "Compare Files", MB_OK | MB_ICONINFORMATION);
+    }
+    for (i = 0; i < count; i++)
+        CmpImage_Unref(images[i]);
+    if (failures || non_acp) {
+        char message[160];
+        _snprintf(message, sizeof(message),
+                  "Skipped %d unreadable and %d non-ACP path(s).",
+                  failures, non_acp);
+        message[sizeof(message) - 1] = '\0';
+        MessageBoxA(g_app.hwnd_main, message, "Compare Files",
+                    MB_OK | MB_ICONINFORMATION);
+    }
+    if (limit_reached)
+        MessageBoxA(g_app.hwnd_main,
+                    "Only four images can be compared at once, and the process-wide limit is eight images.",
+                    "Compare Files", MB_OK | MB_ICONINFORMATION);
+    return opened;
+}
+
+static void App_OnDropFiles(HDROP drop)
+{
+    char paths[CMP_MAX_CELLS][MAX_PATH];
+    cmp_drop_stats_t stats;
+    BOOL include_current = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    BOOL collected;
+    ZeroMemory(paths, sizeof(paths));
+    collected = CmpDrop_Collect(drop, paths, CMP_MAX_CELLS, &stats);
+    DragFinish(drop);
+    if (!collected) {
+        MessageBoxA(g_app.hwnd_main, stats.allocation_failed ?
+                    "Could not collect the dropped image paths." :
+                    "No supported ANSI image paths were found in the drop.",
+                    "Open", MB_OK | (stats.allocation_failed ?
+                    MB_ICONERROR : MB_ICONINFORMATION));
+        return;
+    }
+    App_CompareOpenPaths(paths, (int)stats.collected,
+        include_current ? CMP_OPEN_WITH_CURRENT : CMP_OPEN_MAIN_FIRST);
+    if (!include_current && stats.collected >= 1) {
+        char status[sizeof(g_nav_status)];
+        lstrcpynA(status, g_nav_status, (int)sizeof(status));
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  "%s; Ctrl+drop to include current image", status);
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+        App_UpdateStatus();
+    }
+    if (stats.directories || stats.unsupported || stats.non_acp ||
+        stats.duplicates || stats.truncated) {
+        char message[192];
+        _snprintf(message, sizeof(message),
+                  "Drop: %u image(s), %u folder(s), %u unsupported, "
+                  "%u non-ACP, %u duplicate, %u beyond the four-image limit.",
+                  stats.collected, stats.directories, stats.unsupported,
+                  stats.non_acp, stats.duplicates, stats.truncated);
+        message[sizeof(message) - 1] = '\0';
+        MessageBoxA(g_app.hwnd_main, message, "Open",
+                    MB_OK | MB_ICONINFORMATION);
+    }
 }
 
 static void OpenImageDialog(void)
@@ -892,13 +1031,9 @@ static void CompareFilesDialog(void)
 {
     char selection[32768] = { 0 };
     char paths[CMP_MAX_CELLS][MAX_PATH];
-    cmp_image_t *images[CMP_MAX_CELLS] = { NULL, NULL, NULL, NULL };
     OPENFILENAMEA ofn;
-    HCURSOR old_cursor;
     char initial_directory[MAX_PATH];
-    int count, path_count, i, failures = 0, non_acp = 0;
-    int selection_overflow = 0, limit_reached = 0;
-    char previous_status[sizeof(g_nav_status)];
+    int path_count, selection_overflow = 0;
     if (!Compare_CanOpen(1)) {
         MessageBoxA(g_app.hwnd_main, "The comparison image limit (8) is reached.",
                     "Compare Files", MB_OK | MB_ICONWARNING);
@@ -906,19 +1041,9 @@ static void CompareFilesDialog(void)
     }
     initial_directory[0] = '\0';
     if (g_app.img.valid && g_app.img.path[0]) {
-        const char *slash = strrchr(g_app.img.path, '\\');
-        const char *forward = strrchr(g_app.img.path, '/');
-        const char *last = slash;
-        size_t length;
-        if (!last || (forward && forward > last))
-            last = forward;
-        if (last) {
-            length = (size_t)(last - g_app.img.path);
-            if (length >= sizeof(initial_directory))
-                length = sizeof(initial_directory) - 1;
-            memcpy(initial_directory, g_app.img.path, length);
-            initial_directory[length] = '\0';
-        }
+        lstrcpynA(initial_directory, g_app.img.path, MAX_PATH);
+        if (!PathRemoveFileSpecA(initial_directory))
+            initial_directory[0] = '\0';
     }
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
@@ -939,73 +1064,9 @@ static void CompareFilesDialog(void)
     }
     path_count = compare_parse_selection(selection, paths, CMP_MAX_CELLS,
                                          &selection_overflow);
-    count = 0;
-    lstrcpynA(previous_status, g_nav_status, (int)sizeof(previous_status));
-    strcpy(g_nav_status, "Loading comparison images...");
-    App_UpdateStatus();
-    UpdateWindow(g_app.hwnd_status);
-    old_cursor = SetCursor(LoadCursor(NULL, IDC_WAIT));
-    if (g_app.img.valid && count < CMP_MAX_CELLS) {
-        if (Compare_CanOpen(1)) {
-            images[count] = CmpImage_FromImage(&g_app.img);
-            if (images[count])
-                count++;
-            else
-                failures++;
-        }
-    }
-    for (i = 0; i < path_count && count < CMP_MAX_CELLS; i++) {
-        int j;
-        cmp_image_t *image;
-        if (!paths[i][0] || strchr(paths[i], '?')) {
-            non_acp++;
-            continue;
-        }
-        if (g_app.img.valid &&
-            lstrcmpiA(paths[i], g_app.img.path) == 0)
-            continue;
-        for (j = 0; j < count; j++)
-            if (lstrcmpiA(paths[i], images[j]->img.path) == 0)
-                break;
-        if (j < count)
-            continue;
-        if (!Compare_CanOpen(1)) {
-            limit_reached = 1;
-            break;
-        }
-        image = CmpImage_Load(paths[i]);
-        if (!image) {
-            failures++;
-            continue;
-        }
-        images[count++] = image;
-    }
-    if (i < path_count && count >= CMP_MAX_CELLS)
-        limit_reached = 1;
-    SetCursor(old_cursor);
-    lstrcpynA(g_nav_status, previous_status, (int)sizeof(g_nav_status));
-    App_UpdateStatus();
-    if (count >= 2) {
-        if (!CompareV1_Open(images, count))
-            MessageBoxA(g_app.hwnd_main, "Could not create the comparison window.",
-                        "Compare Files", MB_OK | MB_ICONERROR);
-    } else {
-        MessageBoxA(g_app.hwnd_main,
-                    "Select at least two readable images (the current image is included automatically).",
-                    "Compare Files", MB_OK | MB_ICONINFORMATION);
-    }
-    for (i = 0; i < count; i++)
-        CmpImage_Unref(images[i]);
-    if (failures || non_acp) {
-        char message[160];
-        _snprintf(message, sizeof(message),
-                  "Skipped %d unreadable and %d non-ACP path(s).",
-                  failures, non_acp);
-        message[sizeof(message) - 1] = '\0';
-        MessageBoxA(g_app.hwnd_main, message, "Compare Files",
-                    MB_OK | MB_ICONINFORMATION);
-    }
-    if (selection_overflow || limit_reached)
+    if (path_count > 0)
+        App_CompareOpenPaths(paths, path_count, CMP_OPEN_WITH_CURRENT);
+    if (selection_overflow)
         MessageBoxA(g_app.hwnd_main,
                     "Only four images can be compared at once, and the process-wide limit is eight images.",
                     "Compare Files", MB_OK | MB_ICONINFORMATION);
@@ -1145,7 +1206,6 @@ static void OpenLogFile(void)
 static void OpenImageFolder(void)
 {
     char folder[MAX_PATH];
-    char *slash;
     if (!g_app.img.valid) {
         MessageBoxA(g_app.hwnd_main, "No current image.", "Log",
                     MB_OK | MB_ICONINFORMATION);
@@ -1153,12 +1213,7 @@ static void OpenImageFolder(void)
     }
     strncpy(folder, g_app.img.path, sizeof(folder) - 1);
     folder[sizeof(folder) - 1] = '\0';
-    slash = strrchr(folder, '\\');
-    if (!slash)
-        slash = strrchr(folder, '/');
-    if (slash)
-        *slash = '\0';
-    else
+    if (!PathRemoveFileSpecA(folder))
         strcpy(folder, ".");
     if ((INT_PTR)ShellExecuteA(NULL, "open", folder, NULL, NULL, SW_SHOWNORMAL) <= 32)
         MessageBoxA(g_app.hwnd_main, "Could not open the image folder.", "Log",
@@ -1398,11 +1453,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         return 0;
     }
     case WM_DROPFILES: {
-        HDROP drop = (HDROP)wparam;
-        char path[MAX_PATH] = { 0 };
-        if (DragQueryFileA(drop, 0, path, MAX_PATH))
-            OpenImageFile(path);
-        DragFinish(drop);
+        App_OnDropFiles((HDROP)wparam);
         return 0;
     }
     case WM_DESTROY:

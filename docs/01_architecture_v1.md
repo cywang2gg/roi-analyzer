@@ -1,9 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.6 | 日期：2026-09-27 | 五欄狀態列、WIC、影像金字塔、先顯示後分析與整數累加
+> 版本：v2.7 增補 | 日期：2026-09-27 | 主視窗多檔拖放、比較視窗 Snapshot（存檔＋剪貼簿）、DBCS 路徑修正
 
 ## 變更歷史
 
+- **v2.7 增補（2026-09-27）**：主視窗多檔拖放（`CmpDrop_Collect` 共用收集：W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP；不按 `Ctrl` 且 ≥2 張時主視窗載入第一張＋V1 開全部，按 `Ctrl` 時含目前影像且主視窗不變）。比較視窗 Snapshot（`compare_snap.c` 約 490 行：`CmpSnap_Begin/Finalize/End`＋WIC PNG 編碼＋`CF_BITMAP` 剪貼簿；按鈕與 `Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存、`Ctrl+C` 只複製；存檔位置為影像所在資料夾，檔名 `snap_<A>_vs_<B>_時間戳`，失敗時開另存對話框）。V1／V2 工具列加 `Info bar` 核取方塊。C11：比較模組與 `export` 的路徑拆解改用 shlwapi（DBCS 安全）。詳見 `compareformV1V2_architecture_.md` §14。
 - **v2.7（2026-09-27）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像以參考計數 `cmp_image_t` 共享，目前影像以 `Image_Clone` 記憶體複製交付。詳見 `compareformV1V2_architecture_.md`（定稿 C1～C10）。直方圖命令 ID 移至 161～166；`View` 選單新增 `Compare Files… (Ctrl+K)`／`Compare Current with Next (K)`。
 - **v2.6（2026-09-27）**：狀態列改為游標／訊息／ROI 模式／影像索引／耗時五欄；支援雲端佔位檔提示、WIC 優先解碼與 GDI+ fallback、延遲建立顯示金字塔、先顯示影像再分析，以及以整數逐列累加 RGB／Y 統計。放大使用可見原圖區域與最近鄰顯示；分析、直方圖及游標取色仍使用原圖。
 - **v2.5（2026-09-27）**：加入同資料夾上一張／下一張、自然排序與目錄 mtime 快取；同解析度沿用 ROI、不同解析度重建既有格線；長按方向鍵延後 ROI／直方圖重算。GRID3 與 GRID5 同時存在時，ROI 分析約需兩次全圖掃描；耗時估計以 Release 實測為準。
@@ -21,7 +22,7 @@
 
 以純 C 與 Win32 建立最小化 ROI 分析工具：
 
-- 開啟或拖放 PNG、JPG、BMP 影像；影像依畫布大小等比例縮放並置中，視窗調整大小時同步更新。
+- 開啟或拖放 PNG、JPG、BMP 影像（主視窗拖入 2 張以上時開啟 V1 比較視窗，詳見 §9 比較視窗段）；影像依畫布大小等比例縮放並置中，視窗調整大小時同步更新。
 - 手動拖曳矩形建立 ROI，支援單選新增（取代現有清單）與複選新增（累加）。
 - 支援以右鍵拖曳或 `Ctrl`+方向鍵平移影像；平移時影像不可完全移出畫布。
 - 將整張影像等分為 3×3 或 5×5 區塊；每個區塊都是一個 ROI，並在畫布顯示格線。
@@ -50,6 +51,7 @@ roi-analyzer/
 │   │                  # 視窗登錄表／Compare_PreTranslate
 │   ├── compare_v1.c   # V1 並排視窗（2～4 張：1×2／3×1／2×2，Lock 同步）
 │   ├── compare_v2.c   # V2 分割線視窗（疊加、Swap、各自倍率、像素讀值）
+│   ├── compare_snap.c # Snapshot：DIB 離屏重繪、WIC PNG 編碼、CF_BITMAP 剪貼簿、資訊列
 │   ├── view.h/.c      # 縮放、金字塔繪製與視窗／影像座標換算
 │   ├── roi.h/.c       # ROI 清單、拖曳狀態機與 3×3／5×5 分區
 │   ├── analyze.h/.c   # mean／std 與 Lab 計算
@@ -185,7 +187,7 @@ extern app_t g_app;
 | canvas | `Canvas_Register()`、`CanvasWndProc` | 畫布子視窗；雙緩衝繪製影像、ROI、編號、格線與橡皮筋；首次 paint 後延遲建立金字塔，處理左鍵 ROI 與右鍵平移 |
 | filelist | `FileList_Scan/Refresh/Find/Path/Free()` | 同資料夾影像自然排序清單；記錄 ANSI 路徑可用性及雲端佔位檔屬性 |
 | image | `Image_Load(img, path)`、`Image_Free(img)`、`Image_Clone(dst, src)` | WIC 將整檔讀入記憶體後解碼並 `CopyPixels` 為 BGRA；WIC 失敗則 fallback 至 GDI+ `LockBits`。`Image_Clone` 以 `malloc`＋`memcpy` 複製像素，與 `Image_Free` 同配置器 |
-| compare | `Compare_Init`、`Compare_CanOpen(need)`、`Compare_CloseAll`、`Compare_PreTranslate(msg)`、`CompareV1_Open`、`CompareV2_Open` | 比較視窗模組（無 owner 的獨立頂層視窗）：`cmp_image_t` 參考計數共享影像、`cmp_view_t` 視口中心影像座標模型、`Cmp_Blit` 金字塔繪製、`CmpReg` 視窗登錄表；詳見 `compareformV1V2_architecture_.md` |
+| compare | `Compare_Init`、`Compare_CanOpen(need)`、`Compare_CloseAll`、`Compare_PreTranslate(msg)`、`CompareV1_Open`、`CompareV2_Open` | 比較視窗模組（無 owner 的獨立頂層視窗）：`cmp_image_t` 參考計數共享影像、`cmp_view_t` 視口中心影像座標模型、`Cmp_Blit` 金字塔繪製、`CmpReg` 視窗登錄表、`CmpDrop_Collect` 共用拖放收集、`compare_snap` Snapshot；詳見 `compareformV1V2_architecture_.md` |
 | view | `ViewPyr_Build/Free/Pick()`、`View_DrawImagePyramid()` 與座標換算函式 | 延遲建立最多六層 2×2 平均金字塔；縮小選用仍不低於顯示尺寸的最小層，放大以原圖可見子矩形及 COLORONCOLOR 繪製 |
 | roi | `ROI_Clear()`、`ROI_ClearSource()`、`ROI_Add()`、`ROI_Remove()`、`ROI_BuildGrid(n)`、`ROI_HitTest()`、`ROI_OnLDown/Move/LUp()` | 管理帶來源標籤的共用 ROI 清單、建立分區、命中測試與拖曳狀態機（見 §5） |
 | analyze | `AnalyzeROI(img, rc, out)` | 逐列以 32 位元整數累加 RGB、平方與交叉項，再併入 64 位元總和；寬度超過 66051 時使用 64 位元逐像素 fallback；Y 由 BT.601 加權項推導，Lab 使用 D65 |
@@ -367,7 +369,9 @@ Lab L=53.24 a=80.11 b=67.22
 
 直方圖命令 ID 為 161～166（`IDM_HIST_RGB/_Y/_R/_G/_B/_LOG`），比較視窗命令 ID 為 155／156（`IDM_COMPARE_FILES`／`IDM_COMPARE_NEXT`）。
 
-比較視窗（`Ctrl+K` 開 V1；`K` 開 V2，最後一張時對上一張）為無 owner 的獨立頂層視窗，有自己的工作列按鈕；開啟時自動納入目前影像（以 `Image_Clone` 記憶體複製，不重新解碼）。V1 支援 2～4 張（1×2／3×1／2×2）、`Lock` 同步倍率與平移、拖放加圖、`V2 ▶`；V2 為兩張疊加，可拖曳分割線、`Swap`、各自倍率滑桿、`Sync pan`／平移目標、雙擊重設視圖，狀態列顯示游標下兩張圖各自的影像座標與 RGB。比較視窗影像上限 8 張（開啟前預先檢查），主視窗關閉時先 `Compare_CloseAll()`。
+比較視窗（`Ctrl+K` 開 V1；`K` 開 V2，最後一張時對上一張）為無 owner 的獨立頂層視窗，有自己的工作列按鈕；開啟時自動納入目前影像（以 `Image_Clone` 記憶體複製，不重新解碼）。主視窗拖入 2 張以上時也開 V1：不按 `Ctrl` 時主視窗載入自然排序第一張＋V1 開全部（附註「Ctrl+drop to include current image」），按住 `Ctrl` 放開滑鼠時含目前影像且主視窗不變；拖放判斷以 `CmpDrop_Collect`（W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP）計數，解碼失敗於載入階段另外計數。V1 支援 2～4 張（1×2／3×1／2×2）、`Lock` 同步倍率與平移、拖放加圖、`V2 ▶`；V2 為兩張疊加，可拖曳分割線、`Swap`、各自倍率滑桿、`Sync pan`／平移目標、雙擊重設視圖，狀態列顯示游標下兩張圖各自的影像座標與 RGB。比較視窗影像上限 8 張（開啟前預先檢查），主視窗關閉時先 `Compare_CloseAll()`。
+
+Snapshot（V1 工具列／V2 Actions 的 `Snapshot` 按鈕、`Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存＋複製、`Ctrl+C` 只複製）：同一個繪製函式離屏重繪到 DIB（不受遮擋與系統 DPI 放大影響），加上底部資訊列後以 WIC 編碼 PNG 存檔並以 `CF_BITMAP` 複製到剪貼簿（剪貼簿先做，對話框取消仍保留）。存檔位置為影像所在資料夾（V1 取第 0 格、V2 取畫面左側），檔名 `snap_<A>_vs_<B>_yyyymmdd-hhmmss[_k].png`（A/B 主檔名 DBCS 安全截 32 位元組，不覆寫既有檔），寫入失敗時開另存新檔對話框。資訊列只出現在輸出圖中（畫面不顯示），V1／V2 工具列有 `Info bar` 核取方塊可關閉；內容為檔名、倍率、可見影像區域（影像座標，可對應主視窗 ROI）與時間戳（與檔名同一 `SYSTEMTIME`）。單鍵 `S`／`M`／`P`／`L`／`V`／`0`／`+`／`-` 只在無 `Ctrl` 時生效，避免 `Ctrl+S` 同時觸發 `Swap`。C11：比較模組與 `export` 的路徑拆解一律用 shlwapi（`strrchr` 在 Big5／Shift-JIS 下會在 0x5C 第二位元組處誤切）。
 
 `Layout()` 於 `WM_SIZE` 呼叫，依序配置子視窗：
 
@@ -430,6 +434,7 @@ add_executable(roi_analyzer
     src/compare_core.c
     src/compare_v1.c
     src/compare_v2.c
+    src/compare_snap.c
 )
 
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")

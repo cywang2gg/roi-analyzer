@@ -1,5 +1,6 @@
 #include "compare.h"
 
+#include <shlwapi.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,12 +18,19 @@ static cmp_image_t *alloc_image(void)
 
 static void set_name(cmp_image_t *image, const char *path)
 {
-    const char *backslash = strrchr(path, '\\');
-    const char *slash = strrchr(path, '/');
-    const char *base = backslash;
-    if (!base || (slash && slash > base))
-        base = slash;
-    lstrcpynA(image->name, base ? base + 1 : path, MAX_PATH);
+    const char *base = PathFindFileNameA(path);
+    const char *source = base ? base : path;
+    const char *next;
+    size_t length = 0;
+    while (*source && length < MAX_PATH - 1) {
+        next = CharNextA(source);
+        if ((size_t)(next - source) > MAX_PATH - 1 - length)
+            break;
+        memcpy(image->name + length, source, (size_t)(next - source));
+        length += (size_t)(next - source);
+        source = next;
+    }
+    image->name[length] = '\0';
 }
 
 cmp_image_t *CmpImage_Load(const char *path)

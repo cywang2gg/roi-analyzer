@@ -1,11 +1,16 @@
 #include "compare.h"
 
+#include <limits.h>
 #include <math.h>
+#include <shlwapi.h>
 #include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
 
 static HWND s_windows[CMP_MAX_WINDOWS];
 static int s_window_count;
 static HFONT s_font;
+static const wchar_t (*s_drop_sort_paths)[MAX_PATH];
 
 static double dmin(double a, double b)
 {
@@ -31,9 +36,147 @@ HFONT Compare_Font(void)
     return s_font ? s_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 }
 
+HFONT Cmp_UiFont(void)
+{
+    return Compare_Font();
+}
+
 void Compare_SetFont(HFONT font)
 {
     s_font = font;
+}
+
+BOOL wide_to_acp_strict(const wchar_t *wide, char *path, size_t capacity)
+{
+    wchar_t roundtrip[MAX_PATH];
+    BOOL used_default = FALSE;
+    UINT code_page = GetACP();
+    DWORD flags = code_page == CP_UTF8 ? 0 : WC_NO_BEST_FIT_CHARS;
+    BOOL *used = code_page == CP_UTF8 ? NULL : &used_default;
+    int bytes, wide_chars;
+
+    if (!wide || !wide[0] || !path || capacity == 0 ||
+        capacity > INT_MAX || wcschr(wide, L'?'))
+        return FALSE;
+    bytes = WideCharToMultiByte(code_page, flags, wide, -1, path,
+                                (int)capacity, NULL, used);
+    if (bytes <= 0 || used_default || strchr(path, '?'))
+        return FALSE;
+    wide_chars = MultiByteToWideChar(code_page, 0, path, -1, roundtrip,
+                                     MAX_PATH);
+    return wide_chars > 0 && lstrcmpW(wide, roundtrip) == 0;
+}
+
+static int cmp_drop_compare(const void *left, const void *right)
+{
+    UINT a = *(const UINT *)left;
+    UINT b = *(const UINT *)right;
+    return StrCmpLogicalW(s_drop_sort_paths[a], s_drop_sort_paths[b]);
+}
+
+BOOL CmpDrop_Collect(HDROP drop, char paths[CMP_MAX_CELLS][MAX_PATH],
+                     int capacity, cmp_drop_stats_t *stats)
+{
+    UINT file_count, i, candidate_count = 0;
+    UINT *order = NULL;
+    wchar_t (*wide_paths)[MAX_PATH] = NULL;
+    wchar_t (*sorted_paths)[MAX_PATH] = NULL;
+    cmp_drop_stats_t result;
+    int count = 0;
+
+    ZeroMemory(&result, sizeof(result));
+    if (stats)
+        *stats = result;
+    if (!drop || !paths || capacity <= 0)
+        return FALSE;
+    if (capacity > CMP_MAX_CELLS)
+        capacity = CMP_MAX_CELLS;
+    file_count = DragQueryFileW(drop, 0xffffffffu, NULL, 0);
+    result.input = file_count;
+    if (file_count) {
+        wide_paths = (wchar_t (*)[MAX_PATH])calloc(file_count,
+                                                   sizeof(*wide_paths));
+        order = (UINT *)malloc((size_t)file_count * sizeof(*order));
+        if (!wide_paths || !order) {
+            result.allocation_failed = TRUE;
+            goto done;
+        }
+    }
+    for (i = 0; i < file_count; i++) {
+        wchar_t path[MAX_PATH];
+        DWORD attributes;
+        UINT length = DragQueryFileW(drop, i, path, MAX_PATH);
+        if (!length || length >= MAX_PATH) {
+            result.unsupported++;
+            continue;
+        }
+        attributes = GetFileAttributesW(path);
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            result.directories++;
+            continue;
+        }
+        {
+            const wchar_t *extension = PathFindExtensionW(path);
+            if (_wcsicmp(extension, L".png") != 0 &&
+                _wcsicmp(extension, L".jpg") != 0 &&
+                _wcsicmp(extension, L".jpeg") != 0 &&
+                _wcsicmp(extension, L".bmp") != 0) {
+                result.unsupported++;
+                continue;
+            }
+        }
+        memcpy(wide_paths[candidate_count], path,
+               ((size_t)length + 1) * sizeof(wchar_t));
+        order[candidate_count] = candidate_count;
+        candidate_count++;
+    }
+    s_drop_sort_paths = (const wchar_t (*)[MAX_PATH])wide_paths;
+    if (candidate_count > 1)
+        qsort(order, candidate_count, sizeof(*order), cmp_drop_compare);
+    sorted_paths = (wchar_t (*)[MAX_PATH])calloc(candidate_count,
+                                                 sizeof(*sorted_paths));
+    if (candidate_count && !sorted_paths) {
+        result.allocation_failed = TRUE;
+        goto done;
+    }
+    for (i = 0; i < candidate_count; i++)
+        memcpy(sorted_paths[i], wide_paths[order[i]], sizeof(*sorted_paths));
+    s_drop_sort_paths = (const wchar_t (*)[MAX_PATH])sorted_paths;
+    for (i = 0; i < candidate_count; i++) {
+        int previous;
+        char converted[MAX_PATH];
+        if (i && lstrcmpiW(sorted_paths[i - 1], sorted_paths[i]) == 0) {
+            result.duplicates++;
+            continue;
+        }
+        if (!wide_to_acp_strict(sorted_paths[i], converted,
+                                sizeof(converted))) {
+            result.non_acp++;
+            continue;
+        }
+        for (previous = 0; previous < count; previous++)
+            if (lstrcmpiA(paths[previous], converted) == 0)
+                break;
+        if (previous < count) {
+            result.duplicates++;
+            continue;
+        }
+        if (count == capacity) {
+            result.truncated++;
+            continue;
+        }
+        lstrcpynA(paths[count++], converted, MAX_PATH);
+    }
+    result.collected = (UINT)count;
+done:
+    s_drop_sort_paths = NULL;
+    free(sorted_paths);
+    free(order);
+    free(wide_paths);
+    if (stats)
+        *stats = result;
+    return count > 0;
 }
 
 BOOL Compare_CanOpen(int need)
@@ -182,11 +325,34 @@ void CmpView_ScreenToImage(const cmp_view_t *view, int view_w, int view_h,
     *image_y = view->v + (y - view_h * 0.5) / view->zoom;
 }
 
+BOOL CmpView_VisibleRect(const cmp_view_t *view, int view_w, int view_h,
+                         int image_w, int image_h, RECT *visible)
+{
+    double origin_x, origin_y, left, top, right, bottom;
+    if (!view || !visible || view->zoom <= 0.0 ||
+        view_w <= 0 || view_h <= 0 || image_w <= 0 || image_h <= 0)
+        return FALSE;
+    origin_x = view_w * 0.5 - view->u * view->zoom;
+    origin_y = view_h * 0.5 - view->v * view->zoom;
+    left = fmax(0.0, origin_x);
+    top = fmax(0.0, origin_y);
+    right = fmin((double)view_w, origin_x + image_w * view->zoom);
+    bottom = fmin((double)view_h, origin_y + image_h * view->zoom);
+    if (right <= left || bottom <= top)
+        return FALSE;
+    visible->left = (LONG)floor(left);
+    visible->top = (LONG)floor(top);
+    visible->right = (LONG)ceil(right);
+    visible->bottom = (LONG)ceil(bottom);
+    return TRUE;
+}
+
 void Cmp_Blit(HDC dc, cmp_image_t *image, const cmp_view_t *view,
               const RECT *viewport, const RECT *clip)
 {
     cmp_level_t level;
     BITMAPINFO bitmap_info;
+    RECT view_visible;
     double zoom, origin_x, origin_y, visible_left, visible_top;
     double visible_right, visible_bottom, level_zoom;
     int k = 0, level_count, saved;
@@ -194,6 +360,15 @@ void Cmp_Blit(HDC dc, cmp_image_t *image, const cmp_view_t *view,
 
     if (!dc || !image || !image->img.valid || !view ||
         !viewport || !clip || view->zoom <= 0.0)
+        return;
+    if (!CmpView_VisibleRect(view,
+            viewport->right - viewport->left,
+            viewport->bottom - viewport->top,
+            image->img.w, image->img.h, &view_visible) ||
+        viewport->left + view_visible.right <= clip->left ||
+        viewport->top + view_visible.bottom <= clip->top ||
+        viewport->left + view_visible.left >= clip->right ||
+        viewport->top + view_visible.top >= clip->bottom)
         return;
     zoom = view->zoom;
     origin_x = viewport->left +

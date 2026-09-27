@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <shlwapi.h>
 
 static const char *mode_suffix(roi_mode_t mode)
 {
@@ -19,7 +20,7 @@ static const char *mode_suffix(roi_mode_t mode)
 
 int Export_GetPath(const image_t *img, roi_mode_t mode, char *dst, size_t cap)
 {
-    const char *base, *slash1, *slash2, *dot;
+    const char *base, *extension;
     size_t dir_len, base_len;
     int written;
 
@@ -28,15 +29,13 @@ int Export_GetPath(const image_t *img, roi_mode_t mode, char *dst, size_t cap)
     dst[0] = '\0';
     if (!img || !img->valid || !img->path[0])
         return -1;
-    base = img->path;
-    slash1 = strrchr(img->path, '\\');
-    slash2 = strrchr(img->path, '/');
-    if (slash1 && slash1 + 1 > base)
-        base = slash1 + 1;
-    if (slash2 && slash2 + 1 > base)
-        base = slash2 + 1;
-    dot = strrchr(base, '.');
-    base_len = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+    base = PathFindFileNameA(img->path);
+    if (!base)
+        return -1;
+    extension = PathFindExtensionA(base);
+    if (!extension || extension == base)
+        extension = base + strlen(base);
+    base_len = (size_t)(extension - base);
     dir_len = (size_t)(base - img->path);
     written = _snprintf(dst, cap, "%.*s%.*s_%s.log",
                         (int)dir_len, img->path, (int)base_len, base,

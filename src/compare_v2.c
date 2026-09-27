@@ -1,6 +1,7 @@
 #include "compare.h"
 
 #include <commctrl.h>
+#include <shlwapi.h>
 #include <windowsx.h>
 #include <math.h>
 #include <stdio.h>
@@ -18,6 +19,8 @@
 #define V2_ID_SWAP     4206
 #define V2_ID_SPLIT    4207
 #define V2_ID_RESET    4208
+#define V2_ID_SNAPSHOT 4209
+#define V2_ID_INFO     4210
 
 enum { V2_DRAG_NONE = 0, V2_DRAG_SPLIT, V2_DRAG_PAN };
 
@@ -34,6 +37,9 @@ typedef struct {
     HWND swap_button;
     HWND split_button;
     HWND reset_button;
+    HWND snapshot_button;
+    HWND info_bar;
+    HWND tooltip;
     cmp_image_t *image[2];
     cmp_view_t view[2];
     BOOL swapped;
@@ -42,6 +48,7 @@ typedef struct {
     int pan_side;
     double split_fraction;
     BOOL need_fit;
+    BOOL show_info;
     int drag;
     POINT last;
     int wheel_acc;
@@ -58,6 +65,8 @@ typedef struct {
 
 static const char V2_CLASS[] = "RoiCmpV2";
 static const char V2_OVERLAY_CLASS[] = "RoiCmpOverlay";
+
+static void v2_snapshot(cmp_v2_t *state, BOOL copy_only);
 
 static double v2_clamp(double value, double minimum, double maximum)
 {
@@ -236,6 +245,29 @@ static void v2_reset_all(cmp_v2_t *state)
     InvalidateRect(state->overlay, NULL, FALSE);
 }
 
+static BOOL v2_create_tooltip(cmp_v2_t *state)
+{
+    TOOLINFOA info;
+    state->tooltip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, CW_USEDEFAULT, state->hwnd, NULL,
+        GetModuleHandleA(NULL), NULL);
+    if (!state->tooltip)
+        return FALSE;
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    info.hwnd = state->hwnd;
+    info.uId = (UINT_PTR)state->snapshot_button;
+    info.lpszText = "Save snapshot as PNG and copy it to the clipboard.";
+    if (!SendMessageA(state->tooltip, TTM_ADDTOOLA, 0, (LPARAM)&info)) {
+        DestroyWindow(state->tooltip);
+        state->tooltip = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL v2_prepare_backbuffer(cmp_v2_t *state, HDC dc,
                                   int width, int height)
 {
@@ -257,80 +289,94 @@ static BOOL v2_prepare_backbuffer(cmp_v2_t *state, HDC dc,
     return TRUE;
 }
 
+static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
+                      unsigned int flags)
+{
+    RECT client, viewport, left_clip, right_clip;
+    int split, left_index, right_index;
+    (void)flags;
+    client.left = 0;
+    client.top = 0;
+    client.right = width;
+    client.bottom = height;
+    FillRect(dc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    viewport = client;
+    split = (int)floor(state->split_fraction * client.right + 0.5);
+    if (split < 0) split = 0;
+    if (split > client.right) split = client.right;
+    left_clip.left = 0;
+    left_clip.top = 0;
+    left_clip.right = split;
+    left_clip.bottom = client.bottom;
+    right_clip.left = split;
+    right_clip.top = 0;
+    right_clip.right = client.right;
+    right_clip.bottom = client.bottom;
+    left_index = v2_image_index(state, 0);
+    right_index = v2_image_index(state, 1);
+    Cmp_Blit(dc, state->image[left_index],
+             &state->view[left_index], &viewport, &left_clip);
+    Cmp_Blit(dc, state->image[right_index],
+             &state->view[right_index], &viewport, &right_clip);
+    if (client.right > 0) {
+        HBRUSH yellow = CreateSolidBrush(RGB(255, 220, 0));
+        HGDIOBJ old_brush = SelectObject(dc, yellow);
+        int line_left = split - 1;
+        int line_right = split + 1;
+        if (line_left < 0) {
+            line_left = 0;
+            line_right = client.right < 2 ? client.right : 2;
+        }
+        if (line_right > client.right) {
+            line_right = client.right;
+            line_left = client.right < 2 ? 0 : client.right - 2;
+        }
+        if (line_right > line_left)
+            PatBlt(dc, line_left, 0, line_right - line_left,
+                   client.bottom, PATCOPY);
+        SelectObject(dc, old_brush);
+        DeleteObject(yellow);
+    }
+    {
+        char left_label[MAX_PATH + 32], right_label[MAX_PATH + 32];
+        RECT label = { 8, 8, client.right / 2, 32 };
+        HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+        SetBkMode(dc, OPAQUE);
+        SetBkColor(dc, RGB(0, 0, 0));
+        SetTextColor(dc, RGB(255, 255, 255));
+        SelectObject(dc, Cmp_UiFont());
+        _snprintf(left_label, sizeof(left_label), "A: %s %.0f%%",
+                  state->image[left_index]->name,
+                  state->view[left_index].zoom * 100.0);
+        _snprintf(right_label, sizeof(right_label), "B: %s %.0f%%",
+                  state->image[right_index]->name,
+                  state->view[right_index].zoom * 100.0);
+        left_label[sizeof(left_label) - 1] = '\0';
+        right_label[sizeof(right_label) - 1] = '\0';
+        FillRect(dc, &label, black);
+        DrawTextA(dc, left_label, -1, &label,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+                  DT_END_ELLIPSIS | DT_NOPREFIX);
+        label.left = client.right / 2;
+        label.right = client.right - 8;
+        FillRect(dc, &label, black);
+        DrawTextA(dc, right_label, -1, &label,
+                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE |
+                  DT_END_ELLIPSIS | DT_NOPREFIX);
+        DeleteObject(black);
+    }
+}
+
 static void v2_paint(cmp_v2_t *state, HWND hwnd)
 {
     PAINTSTRUCT paint;
     HDC dc = BeginPaint(hwnd, &paint);
-    RECT client, viewport, left_clip, right_clip;
+    RECT client;
     LARGE_INTEGER start, end, frequency;
-    int split, left_index, right_index;
     QueryPerformanceCounter(&start);
     GetClientRect(hwnd, &client);
     if (v2_prepare_backbuffer(state, dc, client.right, client.bottom)) {
-        FillRect(state->mem_dc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        viewport = client;
-        split = (int)floor(state->split_fraction * client.right + 0.5);
-        if (split < 0) split = 0;
-        if (split > client.right) split = client.right;
-        left_clip.left = 0;
-        left_clip.top = 0;
-        left_clip.right = split;
-        left_clip.bottom = client.bottom;
-        right_clip.left = split;
-        right_clip.top = 0;
-        right_clip.right = client.right;
-        right_clip.bottom = client.bottom;
-        left_index = v2_image_index(state, 0);
-        right_index = v2_image_index(state, 1);
-        Cmp_Blit(state->mem_dc, state->image[left_index],
-                 &state->view[left_index], &viewport, &left_clip);
-        Cmp_Blit(state->mem_dc, state->image[right_index],
-                 &state->view[right_index], &viewport, &right_clip);
-        if (client.right > 0) {
-            HBRUSH yellow = CreateSolidBrush(RGB(255, 220, 0));
-            HGDIOBJ old_brush = SelectObject(state->mem_dc, yellow);
-            int line_left = split - 1;
-            int line_right = split + 1;
-            if (line_left < 0) {
-                line_left = 0;
-                line_right = client.right < 2 ? client.right : 2;
-            }
-            if (line_right > client.right) {
-                line_right = client.right;
-                line_left = client.right < 2 ? 0 : client.right - 2;
-            }
-            if (line_right > line_left)
-                PatBlt(state->mem_dc, line_left, 0, line_right - line_left,
-                       client.bottom, PATCOPY);
-            SelectObject(state->mem_dc, old_brush);
-            DeleteObject(yellow);
-        }
-        {
-            char left_label[MAX_PATH + 8], right_label[MAX_PATH + 8];
-            RECT label = { 8, 8, client.right / 2, 32 };
-            HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
-            SetBkMode(state->mem_dc, OPAQUE);
-            SetBkColor(state->mem_dc, RGB(0, 0, 0));
-            SetTextColor(state->mem_dc, RGB(255, 255, 255));
-            SelectObject(state->mem_dc, Compare_Font());
-            _snprintf(left_label, sizeof(left_label), "A: %s",
-                      state->image[left_index]->name);
-            _snprintf(right_label, sizeof(right_label), "B: %s",
-                      state->image[right_index]->name);
-            left_label[sizeof(left_label) - 1] = '\0';
-            right_label[sizeof(right_label) - 1] = '\0';
-            FillRect(state->mem_dc, &label, black);
-            DrawTextA(state->mem_dc, left_label, -1, &label,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE |
-                      DT_END_ELLIPSIS | DT_NOPREFIX);
-            label.left = client.right / 2;
-            label.right = client.right - 8;
-            FillRect(state->mem_dc, &label, black);
-            DrawTextA(state->mem_dc, right_label, -1, &label,
-                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE |
-                      DT_END_ELLIPSIS | DT_NOPREFIX);
-            DeleteObject(black);
-        }
+        v2_render(state, state->mem_dc, client.right, client.bottom, 0);
         BitBlt(dc, 0, 0, client.right, client.bottom,
                state->mem_dc, 0, 0, SRCCOPY);
     }
@@ -342,10 +388,90 @@ static void v2_paint(cmp_v2_t *state, HWND hwnd)
     EndPaint(hwnd, &paint);
 }
 
+static void v2_snapshot(cmp_v2_t *state, BOOL copy_only)
+{
+    RECT client;
+    SYSTEMTIME now;
+    cmp_snap_t snapshot;
+    char lines[CMP_MAX_CELLS + 1][256] = { { 0 } };
+    char text[256], path[MAX_PATH] = { 0 };
+    int line_count = 0, height, i;
+    BOOL copied;
+    if (!state || !state->overlay ||
+        !GetClientRect(state->overlay, &client))
+        return;
+    GetLocalTime(&now);
+    if (state->show_info) {
+        _snprintf(text, sizeof(text),
+                  "V2 | split %d%% | sync %s | pan %s | %04u-%02u-%02u %02u:%02u:%02u",
+                  (int)(state->split_fraction * 100.0 + 0.5),
+                  state->sync_pan ? "on" : "off",
+                  state->pan_side == 0 ? "A" : "B",
+                  (unsigned int)now.wYear, (unsigned int)now.wMonth,
+                  (unsigned int)now.wDay, (unsigned int)now.wHour,
+                  (unsigned int)now.wMinute, (unsigned int)now.wSecond);
+        CmpInfo_Add(lines, &line_count, text);
+        for (i = 0; i < 2; i++) {
+            int index = v2_image_index(state, i);
+            cmp_image_t *image = state->image[index];
+            _snprintf(text, sizeof(text),
+                      "%c: %s | %.0f%% | %dx%d | %dx%d",
+                      i == 0 ? 'A' : 'B', image->name,
+                      state->view[index].zoom * 100.0,
+                      (int)(image->img.w * state->view[index].zoom),
+                      (int)(image->img.h * state->view[index].zoom),
+                      image->img.w, image->img.h);
+            CmpInfo_Add(lines, &line_count, text);
+        }
+    }
+    height = client.bottom + CmpInfo_Height(Cmp_UiFont(), line_count);
+    if (height <= 0 ||
+        !CmpSnap_Begin(state->hwnd, client.right, height, &snapshot)) {
+        MessageBoxA(state->hwnd, "Could not allocate the snapshot image.",
+                    "Snapshot", MB_OK | MB_ICONERROR);
+        return;
+    }
+    v2_render(state, snapshot.dc, client.right, client.bottom,
+              CMP_RENDER_SNAPSHOT);
+    if (line_count)
+        CmpInfo_Draw(snapshot.dc, client.right, client.bottom, Cmp_UiFont(),
+                     lines, line_count);
+    CmpSnap_Finalize(&snapshot);
+    if (copy_only)
+        copied = CmpSnap_CopyToClipboard(state->hwnd, snapshot.bitmap);
+    else
+        copied = CmpSnap_Deliver(
+            state->hwnd, snapshot.bitmap, &now,
+            state->image[v2_image_index(state, 0)]->img.path,
+            state->image[v2_image_index(state, 0)]->img.path,
+            state->image[v2_image_index(state, 1)]->img.path,
+            path, sizeof(path));
+    CmpSnap_End(&snapshot);
+    if (!copied && (copy_only || !path[0])) {
+        MessageBoxA(state->hwnd,
+                    copy_only ? "Could not copy the snapshot to the clipboard." :
+                                "Could not save or copy the snapshot.",
+                    "Snapshot", MB_OK | MB_ICONERROR);
+    } else if (!copy_only) {
+        char message[MAX_PATH + 64];
+        const char *filename = path[0] ? PathFindFileNameA(path) : NULL;
+        if (filename && copied)
+            _snprintf(message, sizeof(message), "Saved %s + clipboard",
+                      filename);
+        else if (filename)
+            _snprintf(message, sizeof(message), "Saved %s", filename);
+        else
+            _snprintf(message, sizeof(message), "Copied to clipboard");
+        message[sizeof(message) - 1] = '\0';
+        SetWindowTextA(state->status, message);
+    }
+}
+
 static void v2_layout(cmp_v2_t *state)
 {
     RECT client;
-    int width, gz, zoom_w, gx1, pan_w, gx2, act_w, track_w;
+    int width, gz, zoom_w, gx1, pan_w, gx2, act_w, track_w, button_w;
+    int lower_w;
     if (!GetClientRect(state->hwnd, &client))
         return;
     width = client.right;
@@ -375,10 +501,20 @@ static void v2_layout(cmp_v2_t *state)
     MoveWindow(state->sync, gx1 + 8, 20, 130, 22, TRUE);
     MoveWindow(state->pan_left, gx1 + 8, 42, 70, 22, TRUE);
     MoveWindow(state->pan_right, gx1 + 82, 42, 78, 22, TRUE);
-    /* Action buttons left-anchored and compacted to fit a quarter width. */
-    MoveWindow(state->swap_button, gx2 + 6, 24, 60, 28, TRUE);
-    MoveWindow(state->split_button, gx2 + 70, 24, 84, 28, TRUE);
-    MoveWindow(state->reset_button, gx2 + 158, 24, 84, 28, TRUE);
+    button_w = (act_w - 24) / 3;
+    if (button_w < 1)
+        button_w = 1;
+    MoveWindow(state->swap_button, gx2 + 6, 20, button_w, 22, TRUE);
+    MoveWindow(state->split_button, gx2 + 12 + button_w, 20,
+               button_w, 22, TRUE);
+    MoveWindow(state->reset_button, gx2 + 18 + button_w * 2, 20,
+               button_w, 22, TRUE);
+    lower_w = (act_w - 20) / 2;
+    if (lower_w < 1)
+        lower_w = 1;
+    MoveWindow(state->snapshot_button, gx2 + 6, 44, lower_w, 18, TRUE);
+    MoveWindow(state->info_bar, gx2 + 10 + lower_w, 44,
+               lower_w, 18, TRUE);
 }
 
 static void v2_zoom_both(cmp_v2_t *state, int direction, int x, int y)
@@ -591,6 +727,12 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         state->reset_button = CreateWindowExA(0, "BUTTON", "Reset All",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 668, 24, 100, 28,
             hwnd, (HMENU)V2_ID_RESET, instance, NULL);
+        state->snapshot_button = CreateWindowExA(0, "BUTTON", "Snapshot",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 770, 43, 78, 20,
+            hwnd, (HMENU)V2_ID_SNAPSHOT, instance, NULL);
+        state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 850, 43, 86, 20,
+            hwnd, (HMENU)V2_ID_INFO, instance, NULL);
         state->overlay = CreateWindowExA(0, V2_OVERLAY_CLASS, "",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, V2_TOP_H, 0, 0,
             hwnd, NULL, instance, state);
@@ -602,7 +744,10 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             !state->label[1] || !state->track[0] || !state->track[1] ||
             !state->sync || !state->pan_left || !state->pan_right ||
             !state->swap_button || !state->split_button ||
-            !state->reset_button || !state->overlay || !state->status)
+            !state->reset_button || !state->snapshot_button ||
+            !state->info_bar || !state->overlay || !state->status)
+            return -1;
+        if (!v2_create_tooltip(state))
             return -1;
         SendMessageA(state->grp[0], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->grp[1], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
@@ -627,9 +772,15 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
                      (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->reset_button, WM_SETFONT,
                      (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->snapshot_button, WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->info_bar, WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->status, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->pan_left, BM_SETCHECK, BST_CHECKED, 0);
         SendMessageA(state->split_button, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageA(state->info_bar, BM_SETCHECK, BST_CHECKED, 0);
+        state->show_info = TRUE;
         state->need_fit = TRUE;
         v2_layout(state);
         return 0;
@@ -676,6 +827,14 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             case V2_ID_RESET:
                 v2_reset_all(state);
                 break;
+            case V2_ID_SNAPSHOT:
+                v2_snapshot(state, FALSE);
+                break;
+            case V2_ID_INFO:
+                state->show_info =
+                    SendMessageA(state->info_bar, BM_GETCHECK, 0, 0) ==
+                    BST_CHECKED;
+                break;
             default:
                 break;
             }
@@ -706,6 +865,9 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
     case CMPM_KEY:
         if (!state)
             return 0;
+        {
+        BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if ((HWND)GetFocus() == state->track[0] ||
             (HWND)GetFocus() == state->track[1]) {
             if (wparam == VK_LEFT || wparam == VK_RIGHT || wparam == VK_HOME ||
@@ -713,36 +875,50 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
                 return 0;
         }
         if (wparam == VK_ESCAPE ||
-            (wparam == 'W' && (GetKeyState(VK_CONTROL) & 0x8000))) {
+            (wparam == 'W' && ctrl)) {
             DestroyWindow(hwnd);
             return 1;
         }
-        if (wparam == 'S') {
+        if (wparam == 'S' && ctrl && shift) {
+            v2_snapshot(state, FALSE);
+            return 1;
+        }
+        if (wparam == 'S' && ctrl) {
+            v2_snapshot(state, FALSE);
+            return 1;
+        }
+        if (wparam == 'C' && ctrl) {
+            v2_snapshot(state, TRUE);
+            return 1;
+        }
+        if (!ctrl && wparam == 'S') {
             SendMessageA(state->swap_button, BM_CLICK, 0, 0);
             return 1;
         }
-        if (wparam == 'M') {
+        if (!ctrl && wparam == 'M') {
             SendMessageA(state->split_button, BM_CLICK, 0, 0);
             return 1;
         }
-        if (wparam == 'P') {
+        if (!ctrl && wparam == 'P') {
             SendMessageA(state->sync, BM_CLICK, 0, 0);
             return 1;
         }
-        if (wparam == '[') {
+        if (!ctrl && wparam == '[') {
             SendMessageA(state->pan_left, BM_CLICK, 0, 0);
             return 1;
         }
-        if (wparam == ']') {
+        if (!ctrl && wparam == ']') {
             SendMessageA(state->pan_right, BM_CLICK, 0, 0);
             return 1;
         }
-        if (wparam == '0') {
+        if (!ctrl && wparam == '0') {
             v2_reset_all(state);
             return 1;
         }
         if (wparam == VK_ADD || wparam == VK_OEM_PLUS ||
             wparam == VK_SUBTRACT || wparam == VK_OEM_MINUS) {
+            if (ctrl)
+                return 0;
             RECT client;
             GetClientRect(state->overlay, &client);
             v2_zoom_both(state,
@@ -751,9 +927,15 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             return 1;
         }
         return 0;
+        }
     case WM_DESTROY:
-        if (state)
+        if (state) {
+            if (state->tooltip) {
+                DestroyWindow(state->tooltip);
+                state->tooltip = NULL;
+            }
             v2_release(state);
+        }
         return 0;
     case WM_NCDESTROY:
         if (state) {
