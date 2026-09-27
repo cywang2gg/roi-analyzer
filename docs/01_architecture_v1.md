@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.7 增補 | 日期：2026-09-27 | 主視窗多檔拖放、比較視窗 Snapshot（存檔＋剪貼簿）、DBCS 路徑修正
+> 版本：v2.7 增補（直方圖 v1.3） | 日期：2026-09-27 | 主視窗多檔拖放、比較視窗 Snapshot（存檔＋剪貼簿）、DBCS 路徑修正、直方圖 RGB 統計列加 Y 行
 
 ## 變更歷史
+
+- **v2.7 增補追加（2026-09-27）**：Histogram 面板 RGB 疊合統計區由 3 列改為 4 列（R/G/B/Y 各 Mean/StdDev/Median，Y 與 Grid 表格同源 BT.601；Histogram 架構書升 v1.3）。
 
 - **v2.7 增補（2026-09-27）**：主視窗多檔拖放（`CmpDrop_Collect` 共用收集：W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP；不按 `Ctrl` 且 ≥2 張時主視窗載入第一張＋V1 開全部，按 `Ctrl` 時含目前影像且主視窗不變）。比較視窗 Snapshot（`compare_snap.c` 約 550 行：`CmpSnap_Begin/Finalize/End`＋WIC PNG 編碼＋`CF_BITMAP` 剪貼簿；按鈕與 `Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存、`Ctrl+C` 只複製；存檔位置為影像所在資料夾，檔名 `snap_<A>_vs_<B>_時間戳`，失敗時開另存對話框）。Snapshot 輸出尺寸改以**螢幕實際佔用像素**（`Snap_PhysicalScale` 動態切換執行緒 DPI 感知量測，維持 manifest DPI-unaware；`(u,v)` 不變、以 `z×scale` 渲染，可見範圍與螢幕相同但無系統點陣放大模糊）。V1／V2 工具列加 `Info bar` 核取方塊。C11：比較模組與 `export` 的路徑拆解改用 shlwapi（DBCS 安全）。詳見 `compareformV1V2_architecture_.md` §14。
 - **v2.7（2026-09-27）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像以參考計數 `cmp_image_t` 共享，目前影像以 `Image_Clone` 記憶體複製交付。詳見 `compareformV1V2_architecture_.md`（定稿 C1～C10）。直方圖命令 ID 移至 161～166；`View` 選單新增 `Compare Files… (Ctrl+K)`／`Compare Current with Next (K)`。
@@ -29,7 +31,7 @@
 - 支援影像放大與縮小；手動 ROI 與分區 ROI 可同時存在。
 - 在 ROI 上依清單順序標示 1 至 n；每個 ROI 的分析數值以一列顯示於主視窗的 Grid 表格。
 - 使用 Export 按鈕、選單或快速鍵，將目前清單中的全部 ROI 追加至記錄檔。
-- 右側 Histogram 面板：無選取時顯示整張影像，有選取時顯示該 ROI；支援 RGB／Y／R／G／B 通道、線性／對數縱軸、hover 顯示 Level 統計、圖表拖曳選取 Level 範圍。
+- 右側 Histogram 面板：無選取時顯示整張影像，有選取時顯示該 ROI；支援 RGB／Y／R／G／B 通道、線性／對數縱軸、hover 顯示 Level 統計、圖表拖曳選取 Level 範圍。RGB 疊合時統計列顯示 R／G／B／Y 四列（各 Mean／StdDev／Median，Y 與 Grid 表格同源 BT.601）。
 
 非目標：視訊、RTSP、LDC、Macbeth 比對，以及 ROI 拖曳移動或縮放編輯。
 
