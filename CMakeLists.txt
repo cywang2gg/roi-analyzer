@@ -15,6 +15,10 @@ add_executable(roi_analyzer
     src/export.c
     src/histogram.c
     src/histpanel.c
+    src/compare_image.c
+    src/compare_core.c
+    src/compare_v1.c
+    src/compare_v2.c
 )
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)

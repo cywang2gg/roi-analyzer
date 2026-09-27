@@ -9,6 +9,9 @@
 #include "roi.h"
 #include "view.h"
 
+#define IDM_COMPARE_FILES 155
+#define IDM_COMPARE_NEXT  156
+
 typedef struct {
     HWND hwnd_main, hwnd_canvas, hwnd_table, hwnd_tabs, hwnd_status, hwnd_hist;
     HWND hwnd_btn_export, hwnd_btn_clear, hwnd_chk_multi;

@@ -15,6 +15,7 @@ typedef struct image_s {
 int Image_LoadWIC(image_t *img, const char *path);
 // Load PNG/JPG/BMP via WIC, falling back to GDI+. Clears out on entry.
 int Image_Load(image_t *img, const char *path);
+BOOL Image_Clone(image_t *dst, const image_t *src);
 void Image_Free(image_t *img);
 
 #endif

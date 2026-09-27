@@ -2,6 +2,8 @@
 
 #include <gdiplus/gdiplus.h>
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +103,31 @@ int Image_Load(image_t *img, const char *path)
     strcpy(img->decoder, "GDI+");
     img->valid = TRUE;
     return 0;
+}
+
+BOOL Image_Clone(image_t *dst, const image_t *src)
+{
+    size_t bytes;
+
+    if (!dst || dst == src)
+        return FALSE;
+    ZeroMemory(dst, sizeof(*dst));
+    if (!src || !src->valid || !src->px || src->w <= 0 || src->h <= 0 ||
+        src->w > INT_MAX / 4 || src->pitch < src->w * 4 ||
+        (size_t)src->pitch > SIZE_MAX / (size_t)src->h)
+        return FALSE;
+    bytes = (size_t)src->pitch * (size_t)src->h;
+    dst->px = (unsigned char *)malloc(bytes);
+    if (!dst->px)
+        return FALSE;
+    memcpy(dst->px, src->px, bytes);
+    dst->w = src->w;
+    dst->h = src->h;
+    dst->pitch = src->pitch;
+    lstrcpynA(dst->path, src->path, MAX_PATH);
+    lstrcpynA(dst->decoder, src->decoder, (int)sizeof(dst->decoder));
+    dst->valid = TRUE;
+    return TRUE;
 }
 
 void Image_Free(image_t *img)

@@ -4,6 +4,7 @@
 
 ## 變更歷史
 
+- **v2.7（2026-09-27）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像以參考計數 `cmp_image_t` 共享，目前影像以 `Image_Clone` 記憶體複製交付。詳見 `compareformV1V2_architecture_.md`（定稿 C1～C10）。直方圖命令 ID 移至 161～166；`View` 選單新增 `Compare Files… (Ctrl+K)`／`Compare Current with Next (K)`。
 - **v2.6（2026-09-27）**：狀態列改為游標／訊息／ROI 模式／影像索引／耗時五欄；支援雲端佔位檔提示、WIC 優先解碼與 GDI+ fallback、延遲建立顯示金字塔、先顯示影像再分析，以及以整數逐列累加 RGB／Y 統計。放大使用可見原圖區域與最近鄰顯示；分析、直方圖及游標取色仍使用原圖。
 - **v2.5（2026-09-27）**：加入同資料夾上一張／下一張、自然排序與目錄 mtime 快取；同解析度沿用 ROI、不同解析度重建既有格線；長按方向鍵延後 ROI／直方圖重算。GRID3 與 GRID5 同時存在時，ROI 分析約需兩次全圖掃描；耗時估計以 Release 實測為準。
 - **v2.4（2026-09-27）**：右側 Histogram 面板（通道／Log／hover／範圍選取）；DRAG 拖曳中 80ms 節流即時預覽；面板閃爍修正（hover 比對、無背景擦除、分層快取）；啟動改用 comctl32 v6 manifest 並精簡 ICC 旗標。
@@ -42,7 +43,13 @@ roi-analyzer/
 │   ├── canvas.h/.c    # 畫布子視窗：影像、ROI 疊圖與滑鼠事件
 │   ├── filelist.h/.c  # 同資料夾影像清單、自然排序、雲端屬性與索引
 │   ├── image.h/.c     # WIC 優先、GDI+ fallback，解碼為 32 位元 BGRA
+│   │                  # 另提供 Image_Clone（malloc＋memcpy，供比較視窗交付目前影像）
 │   ├── image_wic.c    # WIC 記憶體解碼與 BGRA CopyPixels
+│   ├── compare.h / compare_image.c / compare_core.c
+│   │                  # cmp_image_t 參考計數＋金字塔轉接；縮放／視圖數學／Cmp_Blit／
+│   │                  # 視窗登錄表／Compare_PreTranslate
+│   ├── compare_v1.c   # V1 並排視窗（2～4 張：1×2／3×1／2×2，Lock 同步）
+│   ├── compare_v2.c   # V2 分割線視窗（疊加、Swap、各自倍率、像素讀值）
 │   ├── view.h/.c      # 縮放、金字塔繪製與視窗／影像座標換算
 │   ├── roi.h/.c       # ROI 清單、拖曳狀態機與 3×3／5×5 分區
 │   ├── analyze.h/.c   # mean／std 與 Lab 計算
@@ -57,10 +64,11 @@ roi-analyzer/
 └── docs/
     ├── 01_architecture_v1.md  # 本文件
     ├── 01_histogram_arch.md   # Histogram 模組設計書
+    ├── compareformV1V2_architecture_.md  # CompareForm V1／V2 設計書（v2.7 定稿）
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 3,500 行 C 程式碼，無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
+預估約 5,700 行 C 程式碼（主程式約 3,500＋比較模組約 2,200），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 
@@ -176,7 +184,8 @@ extern app_t g_app;
 | histpanel | `HistPanel_Register/Create/SetSource/ClearSource/SetChannel/SetLogScale` | 右側面板子視窗；三層快取（base／ramp／back）雙緩衝繪製；hover 比對＋子區域重繪；詳見 `01_histogram_arch.md` |
 | canvas | `Canvas_Register()`、`CanvasWndProc` | 畫布子視窗；雙緩衝繪製影像、ROI、編號、格線與橡皮筋；首次 paint 後延遲建立金字塔，處理左鍵 ROI 與右鍵平移 |
 | filelist | `FileList_Scan/Refresh/Find/Path/Free()` | 同資料夾影像自然排序清單；記錄 ANSI 路徑可用性及雲端佔位檔屬性 |
-| image | `Image_Load(img, path)`、`Image_Free(img)` | WIC 將整檔讀入記憶體後解碼並 `CopyPixels` 為 BGRA；WIC 失敗則 fallback 至 GDI+ `LockBits` |
+| image | `Image_Load(img, path)`、`Image_Free(img)`、`Image_Clone(dst, src)` | WIC 將整檔讀入記憶體後解碼並 `CopyPixels` 為 BGRA；WIC 失敗則 fallback 至 GDI+ `LockBits`。`Image_Clone` 以 `malloc`＋`memcpy` 複製像素，與 `Image_Free` 同配置器 |
+| compare | `Compare_Init`、`Compare_CanOpen(need)`、`Compare_CloseAll`、`Compare_PreTranslate(msg)`、`CompareV1_Open`、`CompareV2_Open` | 比較視窗模組（無 owner 的獨立頂層視窗）：`cmp_image_t` 參考計數共享影像、`cmp_view_t` 視口中心影像座標模型、`Cmp_Blit` 金字塔繪製、`CmpReg` 視窗登錄表；詳見 `compareformV1V2_architecture_.md` |
 | view | `ViewPyr_Build/Free/Pick()`、`View_DrawImagePyramid()` 與座標換算函式 | 延遲建立最多六層 2×2 平均金字塔；縮小選用仍不低於顯示尺寸的最小層，放大以原圖可見子矩形及 COLORONCOLOR 繪製 |
 | roi | `ROI_Clear()`、`ROI_ClearSource()`、`ROI_Add()`、`ROI_Remove()`、`ROI_BuildGrid(n)`、`ROI_HitTest()`、`ROI_OnLDown/Move/LUp()` | 管理帶來源標籤的共用 ROI 清單、建立分區、命中測試與拖曳狀態機（見 §5） |
 | analyze | `AnalyzeROI(img, rc, out)` | 逐列以 32 位元整數累加 RGB、平方與交叉項，再併入 64 位元總和；寬度超過 66051 時使用 64 位元逐像素 fallback；Y 由 BT.601 加權項推導，Lab 使用 D65 |
@@ -354,7 +363,11 @@ Lab L=53.24 a=80.11 b=67.22
 - **Mode**：`Drag [1]`、`3x3 Grid [2]`、`5x5 Grid [3]`、分隔線、`Multi Select [M]`。複選項目的勾選狀態與按鈕列核取方塊同步。
 - **Edit**：`Delete Selected ROI [Del]`、`Clear Current Tab ROI [C]`、`Clear All ROI [Shift+C]`。
 - **Log**：`Open Log File`、`Open Folder`。
-- **View**：`Histogram Panel [H]`（打勾項）、分隔線、`Channel: RGB [A]／Luminosity [Y]／Red [R]／Green [G]／Blue [B]`（單選打勾）、`Log Scale [L]`（打勾項）。
+- **View**：`Histogram Panel [H]`（打勾項）、分隔線、`Channel: RGB [A]／Luminosity [Y]／Red [R]／Green [G]／Blue [B]`（單選打勾）、`Log Scale [L]`（打勾項）、分隔線、`Compare Files… [Ctrl+K]`、`Compare Current with Next [K]`。
+
+直方圖命令 ID 為 161～166（`IDM_HIST_RGB/_Y/_R/_G/_B/_LOG`），比較視窗命令 ID 為 155／156（`IDM_COMPARE_FILES`／`IDM_COMPARE_NEXT`）。
+
+比較視窗（`Ctrl+K` 開 V1；`K` 開 V2，最後一張時對上一張）為無 owner 的獨立頂層視窗，有自己的工作列按鈕；開啟時自動納入目前影像（以 `Image_Clone` 記憶體複製，不重新解碼）。V1 支援 2～4 張（1×2／3×1／2×2）、`Lock` 同步倍率與平移、拖放加圖、`V2 ▶`；V2 為兩張疊加，可拖曳分割線、`Swap`、各自倍率滑桿、`Sync pan`／平移目標、雙擊重設視圖，狀態列顯示游標下兩張圖各自的影像座標與 RGB。比較視窗影像上限 8 張（開啟前預先檢查），主視窗關閉時先 `Compare_CloseAll()`。
 
 `Layout()` 於 `WM_SIZE` 呼叫，依序配置子視窗：
 
@@ -413,6 +426,10 @@ add_executable(roi_analyzer
     src/histpanel.c
     src/table.c
     src/export.c
+    src/compare_image.c
+    src/compare_core.c
+    src/compare_v1.c
+    src/compare_v2.c
 )
 
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
@@ -449,3 +466,4 @@ cmake --build build
 1. **3×3／5×5 的語意**：本版定義為整張影像分成 9／25 個 ROI。若仍需以點擊位置為中心取 3×3／5×5 像素，須另增模式。
 2. **單選／複選的語意**：本版以複選核取方塊控制新增時是否累加，並支援 Ctrl 暫時累加。表格仍維持單列選取；若需求是同時選取多列，需改用 ListView 多重選取並另定義刪除與匯出的選取範圍。
 3. **匯出方式與格式**：本版固定依 ROI 來源輸出至影像旁的 append 記錄檔。若需「另存新檔」對話框或 CSV 格式以供試算表使用，須新增 Export As 功能。
+4. **比較視窗已知限制**：未宣告 DPI 感知，150% 等非 100% 系統縮放下比較視窗與主畫布一樣經系統點陣放大，100% 不是真正的像素對像素；B1 背景預載尚未實作，連開多張大圖時開啟 V1 需等待解碼完成。

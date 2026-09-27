@@ -11,6 +11,7 @@
 
 #include "app.h"
 #include "canvas.h"
+#include "compare.h"
 #include "export.h"
 #include "histpanel.h"
 #include "table.h"
@@ -32,12 +33,12 @@
 #define IDM_ZOOM_IN    141
 #define IDM_ZOOM_OUT   142
 #define IDM_HISTOGRAM  151
-#define IDM_HIST_RGB   152
-#define IDM_HIST_Y     153
-#define IDM_HIST_R     154
-#define IDM_HIST_G     155
-#define IDM_HIST_B     156
-#define IDM_HIST_LOG   157
+#define IDM_HIST_RGB   161
+#define IDM_HIST_Y     162
+#define IDM_HIST_R     163
+#define IDM_HIST_G     164
+#define IDM_HIST_B     165
+#define IDM_HIST_LOG   166
 #define IDC_CANVAS     1001
 #define IDC_TABLE      1002
 #define IDC_EXPORT     1003
@@ -83,6 +84,8 @@ static void ChangeZoom(float factor);
 static void SetHistogramChannel(hist_channel_t channel);
 static void UpdateTitle(void);
 static void App_UpdateTable(void);
+static void CompareFilesDialog(void);
+static void CompareCurrentWithNext(void);
 
 static BOOL copy_utf8_to_acp(char *destination, size_t capacity,
                              const char *source)
@@ -846,6 +849,240 @@ static void OpenImageDialog(void)
         OpenImageFile(file);
 }
 
+static int compare_parse_selection(const char *buffer,
+                                   char paths[CMP_MAX_CELLS][MAX_PATH],
+                                   int capacity, int *overflow)
+{
+    const char *name, *directory;
+    int count = 0, length;
+    if (!buffer || !buffer[0] || capacity <= 0)
+        return 0;
+    if (overflow)
+        *overflow = 0;
+    directory = buffer;
+    length = (int)strlen(directory);
+    name = directory + length + 1;
+    if (!name[0]) {
+        if (length >= MAX_PATH) {
+            if (overflow)
+                *overflow = 1;
+            return 0;
+        }
+        lstrcpynA(paths[count++], directory, MAX_PATH);
+        return count;
+    }
+    while (*name) {
+        if (count < capacity) {
+            int result = snprintf(paths[count], MAX_PATH, "%s%s%s", directory,
+                                  (length > 0 &&
+                                   (directory[length - 1] == '\\' ||
+                                    directory[length - 1] == '/')) ? "" : "\\",
+                                  name);
+            if (result > 0 && result < MAX_PATH)
+                count++;
+        } else if (overflow) {
+            (*overflow)++;
+        }
+        name += strlen(name) + 1;
+    }
+    return count;
+}
+
+static void CompareFilesDialog(void)
+{
+    char selection[32768] = { 0 };
+    char paths[CMP_MAX_CELLS][MAX_PATH];
+    cmp_image_t *images[CMP_MAX_CELLS] = { NULL, NULL, NULL, NULL };
+    OPENFILENAMEA ofn;
+    HCURSOR old_cursor;
+    char initial_directory[MAX_PATH];
+    int count, path_count, i, failures = 0, non_acp = 0;
+    int selection_overflow = 0, limit_reached = 0;
+    char previous_status[sizeof(g_nav_status)];
+    if (!Compare_CanOpen(1)) {
+        MessageBoxA(g_app.hwnd_main, "The comparison image limit (8) is reached.",
+                    "Compare Files", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    initial_directory[0] = '\0';
+    if (g_app.img.valid && g_app.img.path[0]) {
+        const char *slash = strrchr(g_app.img.path, '\\');
+        const char *forward = strrchr(g_app.img.path, '/');
+        const char *last = slash;
+        size_t length;
+        if (!last || (forward && forward > last))
+            last = forward;
+        if (last) {
+            length = (size_t)(last - g_app.img.path);
+            if (length >= sizeof(initial_directory))
+                length = sizeof(initial_directory) - 1;
+            memcpy(initial_directory, g_app.img.path, length);
+            initial_directory[length] = '\0';
+        }
+    }
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_app.hwnd_main;
+    ofn.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg;*.bmp\0All files\0*.*\0";
+    ofn.lpstrFile = selection;
+    ofn.nMaxFile = (DWORD)sizeof(selection);
+    ofn.lpstrInitialDir = initial_directory[0] ? initial_directory : NULL;
+    ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST |
+                OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameA(&ofn)) {
+        DWORD error = CommDlgExtendedError();
+        if (error == FNERR_BUFFERTOOSMALL)
+            MessageBoxA(g_app.hwnd_main,
+                        "The selection contains too many files. Select fewer images.",
+                        "Compare Files", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    path_count = compare_parse_selection(selection, paths, CMP_MAX_CELLS,
+                                         &selection_overflow);
+    count = 0;
+    lstrcpynA(previous_status, g_nav_status, (int)sizeof(previous_status));
+    strcpy(g_nav_status, "Loading comparison images...");
+    App_UpdateStatus();
+    UpdateWindow(g_app.hwnd_status);
+    old_cursor = SetCursor(LoadCursor(NULL, IDC_WAIT));
+    if (g_app.img.valid && count < CMP_MAX_CELLS) {
+        if (Compare_CanOpen(1)) {
+            images[count] = CmpImage_FromImage(&g_app.img);
+            if (images[count])
+                count++;
+            else
+                failures++;
+        }
+    }
+    for (i = 0; i < path_count && count < CMP_MAX_CELLS; i++) {
+        int j;
+        cmp_image_t *image;
+        if (!paths[i][0] || strchr(paths[i], '?')) {
+            non_acp++;
+            continue;
+        }
+        if (g_app.img.valid &&
+            lstrcmpiA(paths[i], g_app.img.path) == 0)
+            continue;
+        for (j = 0; j < count; j++)
+            if (lstrcmpiA(paths[i], images[j]->img.path) == 0)
+                break;
+        if (j < count)
+            continue;
+        if (!Compare_CanOpen(1)) {
+            limit_reached = 1;
+            break;
+        }
+        image = CmpImage_Load(paths[i]);
+        if (!image) {
+            failures++;
+            continue;
+        }
+        images[count++] = image;
+    }
+    if (i < path_count && count >= CMP_MAX_CELLS)
+        limit_reached = 1;
+    SetCursor(old_cursor);
+    lstrcpynA(g_nav_status, previous_status, (int)sizeof(g_nav_status));
+    App_UpdateStatus();
+    if (count >= 2) {
+        if (!CompareV1_Open(images, count))
+            MessageBoxA(g_app.hwnd_main, "Could not create the comparison window.",
+                        "Compare Files", MB_OK | MB_ICONERROR);
+    } else {
+        MessageBoxA(g_app.hwnd_main,
+                    "Select at least two readable images (the current image is included automatically).",
+                    "Compare Files", MB_OK | MB_ICONINFORMATION);
+    }
+    for (i = 0; i < count; i++)
+        CmpImage_Unref(images[i]);
+    if (failures || non_acp) {
+        char message[160];
+        _snprintf(message, sizeof(message),
+                  "Skipped %d unreadable and %d non-ACP path(s).",
+                  failures, non_acp);
+        message[sizeof(message) - 1] = '\0';
+        MessageBoxA(g_app.hwnd_main, message, "Compare Files",
+                    MB_OK | MB_ICONINFORMATION);
+    }
+    if (selection_overflow || limit_reached)
+        MessageBoxA(g_app.hwnd_main,
+                    "Only four images can be compared at once, and the process-wide limit is eight images.",
+                    "Compare Files", MB_OK | MB_ICONINFORMATION);
+}
+
+static void CompareCurrentWithNext(void)
+{
+    cmp_image_t *current = NULL, *next = NULL;
+    BOOL exact = FALSE;
+    int current_index, target;
+    char path[MAX_PATH];
+    char previous_status[sizeof(g_nav_status)];
+    if (!g_app.img.valid) {
+        MessageBeep(MB_ICONWARNING);
+        MessageBoxA(g_app.hwnd_main, "Open an image first.",
+                    "Compare Current with Next", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_app.drag.dragging)
+        return;
+    if (!Compare_CanOpen(2)) {
+        MessageBoxA(g_app.hwnd_main, "The comparison image limit (8) is reached.",
+                    "Compare Current with Next", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    App_FlushPending();
+    if (!FileList_Refresh(&g_app.files, g_app.img.path)) {
+        MessageBoxA(g_app.hwnd_main, "Could not scan the current image folder.",
+                    "Compare Current with Next", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    current_index = FileList_Find(&g_app.files,
+                                  image_basename(g_app.img.path), &exact);
+    if (current_index < 0 || g_app.files.count < 2) {
+        MessageBeep(MB_ICONWARNING);
+        MessageBoxA(g_app.hwnd_main, "There is no other image in this folder.",
+                    "Compare Current with Next", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    target = exact ? current_index + 1 : current_index;
+    if (target >= g_app.files.count)
+        target = current_index - 1;
+    if (target < 0 || target >= g_app.files.count ||
+        !FileList_Path(&g_app.files, target, path)) {
+        MessageBoxA(g_app.hwnd_main, "The next image path is not representable in the system code page.",
+                    "Compare Current with Next", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    current = CmpImage_FromImage(&g_app.img);
+    if (!current) {
+        MessageBoxA(g_app.hwnd_main, "Could not copy the current image.",
+                    "Compare Current with Next", MB_OK | MB_ICONERROR);
+        return;
+    }
+    lstrcpynA(previous_status, g_nav_status, (int)sizeof(previous_status));
+    if (g_app.files.cloud[target]) {
+        strcpy(g_nav_status, "Cloud file downloading...");
+        App_UpdateStatus();
+        UpdateWindow(g_app.hwnd_status);
+    }
+    if (Compare_CanOpen(1))
+        next = CmpImage_Load(path);
+    lstrcpynA(g_nav_status, previous_status, (int)sizeof(g_nav_status));
+    App_UpdateStatus();
+    if (!next) {
+        CmpImage_Unref(current);
+        MessageBoxA(g_app.hwnd_main, "Could not load the next image.",
+                    "Compare Current with Next", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (!CompareV2_Open(current, next))
+        MessageBoxA(g_app.hwnd_main, "Could not create the comparison window.",
+                    "Compare Current with Next", MB_OK | MB_ICONERROR);
+    CmpImage_Unref(current);
+    CmpImage_Unref(next);
+}
+
 static void ExportCurrent(void)
 {
     char paths[3][MAX_PATH];
@@ -1080,6 +1317,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             App_Navigate(-1, FALSE);
         else if (id == IDM_NEXT)
             App_Navigate(1, FALSE);
+        else if (id == IDM_COMPARE_FILES)
+            CompareFilesDialog();
+        else if (id == IDM_COMPARE_NEXT)
+            CompareCurrentWithNext();
         else if (id == IDM_DRAG)
             SetMode(MODE_DRAG);
         else if (id == IDM_GRID3)
@@ -1165,6 +1406,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         return 0;
     }
     case WM_DESTROY:
+        Compare_CloseAll();
         DragAcceptFiles(hwnd, FALSE);
         PostQuitMessage(0);
         return 0;
@@ -1205,6 +1447,10 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(view, MF_STRING, IDM_HIST_G, "Green\tG");
     AppendMenuA(view, MF_STRING, IDM_HIST_B, "Blue\tB");
     AppendMenuA(view, MF_STRING, IDM_HIST_LOG, "Log Scale\tL");
+    AppendMenuA(view, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(view, MF_STRING, IDM_COMPARE_FILES, "Compare Files...\tCtrl+K");
+    AppendMenuA(view, MF_STRING, IDM_COMPARE_NEXT,
+                "Compare Current with Next\tK");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "File");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mode, "Mode");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)edit, "Edit");
@@ -1227,7 +1473,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         { FVIRTKEY, 'R', IDM_HIST_R },
         { FVIRTKEY, 'G', IDM_HIST_G },
         { FVIRTKEY, 'B', IDM_HIST_B },
-        { FVIRTKEY, 'L', IDM_HIST_LOG }
+        { FVIRTKEY, 'L', IDM_HIST_LOG },
+        { FVIRTKEY | FCONTROL, 'K', IDM_COMPARE_FILES },
+        { FVIRTKEY, 'K', IDM_COMPARE_NEXT }
     };
     MSG msg;
     int screen_width, screen_height, width, height, x, y;
@@ -1251,6 +1499,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     QueryPerformanceFrequency(&g_qpc_frequency);
     ROI_Init(&g_app.rois, &g_app.drag);
     App_InitCommonControls();
+    if (!Compare_Init(instance, (HFONT)GetStockObject(DEFAULT_GUI_FONT))) {
+        MessageBoxA(NULL, "Could not register the comparison window classes.",
+                    "ROI Analyzer", MB_OK | MB_ICONERROR);
+        CoUninitialize();
+        return 1;
+    }
     {
         GdiplusStartupInput input = { 1, NULL, FALSE, FALSE };
         if (GdiplusStartup(&g_gdiplus, &input, NULL) != Ok) {
@@ -1333,23 +1587,29 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     }
     s_nav_done_tick = GetTickCount();
     while ((result = GetMessageA(&msg, NULL, 0, 0)) > 0) {
-        if (msg.message == WM_KEYUP &&
-            (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT))
-            App_FlushPending();
-        if (msg.message == WM_KEYDOWN &&
-            (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) &&
-            App_NavKeyAllowed(&msg)) {
-            BOOL repeat = (msg.lParam & (1L << 30)) != 0;
-            if (repeat && (LONG)(msg.time - s_nav_done_tick) < 0)
-                continue;
-            App_Navigate(msg.wParam == VK_LEFT ? -1 : 1, repeat);
-            s_nav_done_tick = GetTickCount();
+        HWND root;
+        if (Compare_PreTranslate(&msg))
             continue;
+        root = msg.hwnd ? GetAncestor(msg.hwnd, GA_ROOT) : NULL;
+        if (root == g_app.hwnd_main) {
+            if (msg.message == WM_KEYUP &&
+                (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT))
+                App_FlushPending();
+            if (msg.message == WM_KEYDOWN &&
+                (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) &&
+                App_NavKeyAllowed(&msg)) {
+                BOOL repeat = (msg.lParam & (1L << 30)) != 0;
+                if (repeat && (LONG)(msg.time - s_nav_done_tick) < 0)
+                    continue;
+                App_Navigate(msg.wParam == VK_LEFT ? -1 : 1, repeat);
+                s_nav_done_tick = GetTickCount();
+                continue;
+            }
+            if (TranslateAcceleratorA(g_app.hwnd_main, g_accelerators, &msg))
+                continue;
         }
-        if (!TranslateAcceleratorA(g_app.hwnd_main, g_accelerators, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
     }
     if (g_accelerators)
         DestroyAcceleratorTable(g_accelerators);
