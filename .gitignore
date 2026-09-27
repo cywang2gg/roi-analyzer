@@ -4,3 +4,4 @@ bin/*.log
 testdata/*_drag.log
 testdata/*_3x3.log
 testdata/*_5x5.log
+bin/*.png
