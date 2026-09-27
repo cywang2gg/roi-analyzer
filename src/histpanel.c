@@ -362,7 +362,7 @@ static void paint_stats(HDC hdc, hist_panel_t *panel)
     char line[160];
     int y = panel->stats.top;
     int line_height = 16;
-    int ch, channels[3], count = panel->channel == HCH_RGB ? 3 : 1;
+    int ch, channels[4], count = panel->channel == HCH_RGB ? 4 : 1;
     static const char *const short_names[] = { "R", "G", "B", "Y" };
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
@@ -374,6 +374,7 @@ static void paint_stats(HDC hdc, hist_panel_t *panel)
         channels[0] = HIST_R;
         channels[1] = HIST_G;
         channels[2] = HIST_B;
+        channels[3] = HIST_Y;
     } else {
         channels[0] = current_channel_index(panel->channel);
     }

@@ -4,10 +4,11 @@
 
 # Histogram 模組 — 架構設計書
 
-> 版本 v1.2 | 2026-09-27 | 拖曳即時預覽、閃爍修正、啟動 manifest
+> 版本 v1.3 | 2026-09-27 | 拖曳即時預覽、閃爍修正、啟動 manifest
 
 變更歷史:
 
+- v1.3 (2026-09-27):RGB疊合統計區由3列改為4列（R/G/B/Y各Mean/StdDev/Median；Y與Grid表格BT.601公式同源）
 - v1.2 (2026-09-27):DRAG 拖曳中 80ms 節流即時預覽(`App_PreviewHistogram`)；閃爍修正(hover 比對、無背景擦除、三層快取雙緩衝)；啟動改用 comctl32 v6 manifest 並精簡 ICC 旗標。
 
 - v1.0 (2026-09-26):新模組。提供類似 Photoshop 的 Histogram 面板。
@@ -248,7 +249,7 @@ LUp 保持原正式流程（建框＋`App_RoiChanged`＋最終精確更新）。
   - `Source: Drag #2 (10,10)-(59,59)`
   - `Source: 3x3 #5 (0,0)-(212,159)` / `Source: 5x5 #13 (...)`
   - `No image`
-- RGB 疊合模式下,統計區改為 3 列(R / G / B 各顯示 Mean / StdDev / Median);停留時顯示該 Level 的 R/G/B 三個 Count
+- RGB 疊合模式下,統計區改為 4 列（R/G/B/Y 各顯示 Mean / StdDev / Median）;停留時顯示該 Level 的 R/G/B 三個 Count
 
 ### 5.2 圖表繪製
 
