@@ -6,9 +6,38 @@
 
 #include "app.h"
 
+#define WM_CANVAS_BUILD_PYRAMID (WM_APP + 1)
+
 static BOOL g_panning;
 static POINT g_pan_last;
 static DWORD s_last_preview_tick;
+static BOOL s_has_preview;
+
+void Canvas_NavigationStarted(void)
+{
+    if (s_has_preview)
+        s_has_preview = FALSE;
+}
+
+static void build_pyramid(HWND hwnd)
+{
+    g_app.pyramid_pending = FALSE;
+    if (g_app.img.valid && !g_app.pyramid_attempted) {
+        g_app.pyramid_attempted = TRUE;
+        if (ViewPyr_Build(&g_app.pyramid, &g_app.img)) {
+            g_app.pyramid_gen = g_app.img_gen;
+            InvalidateRect(hwnd, NULL, FALSE);
+        } else {
+            OutputDebugStringA("ROI Analyzer: image pyramid allocation failed; using full-resolution rendering.\n");
+        }
+    }
+}
+
+void Canvas_BuildPyramidNow(void)
+{
+    if (g_app.hwnd_canvas)
+        SendMessage(g_app.hwnd_canvas, WM_CANVAS_BUILD_PYRAMID, 0, 0);
+}
 
 static void draw_outline(HDC hdc, const RECT *rc, COLORREF color, int width,
                          int pen_style)
@@ -112,6 +141,9 @@ BOOL Canvas_Register(HINSTANCE instance)
 LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
+    case WM_CANVAS_BUILD_PYRAMID:
+        build_pyramid(hwnd);
+        return 0;
     case WM_SIZE:
         View_Update(&g_app.view, LOWORD(lparam), HIWORD(lparam),
                     g_app.img.valid ? g_app.img.w : 0,
@@ -122,6 +154,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
         return 1;
     case WM_LBUTTONDOWN: {
         POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        App_FlushPending();
         if (!g_app.img.valid)
             return 0;
         SetFocus(hwnd);
@@ -170,6 +203,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
                     if (img_rc.left < img_rc.right &&
                         img_rc.top < img_rc.bottom) {
                         App_PreviewHistogram(img_rc);
+                        s_has_preview = TRUE;
                         s_last_preview_tick = tick;
                     }
                 }
@@ -279,8 +313,9 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             App_UpdateStatus();
             return 0;
         }
-        if (wparam == VK_LEFT || wparam == VK_RIGHT ||
-            wparam == VK_UP || wparam == VK_DOWN) {
+        if ((wparam == VK_LEFT || wparam == VK_RIGHT ||
+             wparam == VK_UP || wparam == VK_DOWN) &&
+            (GetKeyState(VK_CONTROL) & 0x8000)) {
             int distance = (GetKeyState(VK_SHIFT) & 0x8000) ? 100 : 20;
             int dx = 0, dy = 0;
             RECT rc;
@@ -303,10 +338,12 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
         break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
+        LARGE_INTEGER paint_started;
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         HDC mem;
         HBITMAP bitmap, old_bitmap;
+        QueryPerformanceCounter(&paint_started);
         GetClientRect(hwnd, &rc);
         mem = CreateCompatibleDC(hdc);
         bitmap = CreateCompatibleBitmap(hdc,
@@ -319,6 +356,11 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
                 DeleteDC(mem);
             FillRect(hdc, &rc, GetSysColorBrush(COLOR_APPWORKSPACE));
             EndPaint(hwnd, &ps);
+            if (g_app.paint_pending) {
+                g_app.paint_ms = App_Ms(paint_started);
+                g_app.paint_pending = FALSE;
+                App_UpdateStatus();
+            }
             return 0;
         }
         old_bitmap = (HBITMAP)SelectObject(mem, bitmap);
@@ -330,7 +372,12 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             }
         }
         if (g_app.img.valid) {
-            View_DrawImage(mem, &g_app.view, &g_app.img);
+            if (g_app.pyramid.count > 0 &&
+                g_app.pyramid_gen == g_app.img_gen)
+                View_DrawImagePyramid(mem, &g_app.view, &g_app.img,
+                                      &g_app.pyramid);
+            else
+                View_DrawImage(mem, &g_app.view, &g_app.img);
             draw_roi_overlay(mem);
         }
         BitBlt(hdc, rc.left, rc.top, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
@@ -338,6 +385,16 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
         DeleteObject(bitmap);
         DeleteDC(mem);
         EndPaint(hwnd, &ps);
+        if (g_app.img.valid && !g_app.pyramid_attempted &&
+            !g_app.pyramid_pending) {
+            g_app.pyramid_pending = TRUE;
+            PostMessage(hwnd, WM_CANVAS_BUILD_PYRAMID, 0, 0);
+        }
+        if (g_app.paint_pending) {
+            g_app.paint_ms = App_Ms(paint_started);
+            g_app.paint_pending = FALSE;
+            App_UpdateStatus();
+        }
         return 0;
     }
     }

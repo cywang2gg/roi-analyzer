@@ -5,7 +5,9 @@ add_executable(roi_analyzer
     src/app.rc
     src/main.c
     src/canvas.c
+    src/filelist.c
     src/image.c
+    src/image_wic.c
     src/view.c
     src/roi.c
     src/analyze.c
@@ -17,5 +19,5 @@ add_executable(roi_analyzer
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)
 target_compile_definitions(roi_analyzer PRIVATE NOMINMAX)
-target_link_libraries(roi_analyzer user32 gdi32 kernel32 comctl32 comdlg32 gdiplus shell32 m)
+target_link_libraries(roi_analyzer user32 gdi32 kernel32 comctl32 comdlg32 gdiplus shell32 shlwapi windowscodecs ole32 uuid m)
 set_target_properties(roi_analyzer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin LINK_FLAGS "-mwindows")

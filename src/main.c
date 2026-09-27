@@ -3,6 +3,8 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <gdiplus/gdiplus.h>
+#include <limits.h>
+#include <objbase.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -16,6 +18,8 @@
 #define IDM_OPEN       101
 #define IDM_EXPORT     102
 #define IDM_EXIT       103
+#define IDM_PREVIOUS   104
+#define IDM_NEXT       105
 #define IDM_DRAG       111
 #define IDM_GRID3      112
 #define IDM_GRID5      113
@@ -41,6 +45,12 @@
 #define IDC_MULTI      1005
 #define IDC_TABS       1006
 #define IDC_HISTPANEL  1007
+#define SB_PART_POS    0
+#define SB_PART_MSG    1
+#define SB_PART_MODE   2
+#define SB_PART_INDEX  3
+#define SB_PART_TIME   4
+#define SB_PART_COUNT  5
 
 app_t g_app;
 
@@ -52,6 +62,17 @@ static HMENU g_menu_mode;
 static HMENU g_menu_view;
 static hist_channel_t g_hist_channel = HCH_RGB;
 static BOOL g_hist_log;
+static LARGE_INTEGER g_qpc_frequency;
+static LARGE_INTEGER g_nav_started;
+static double g_load_ms;
+static double g_analyze_ms;
+static double g_hist_ms;
+static double g_show_ms;
+static double g_done_ms;
+static BOOL g_current_exact;
+static BOOL g_browsing;
+static char g_nav_status[128] = "Ready";
+static char g_status_index[32];
 
 static BOOL App_InitCommonControls(void);
 static void Layout(void);
@@ -60,6 +81,21 @@ static void SetMulti(BOOL multi);
 static void ExportCurrent(void);
 static void ChangeZoom(float factor);
 static void SetHistogramChannel(hist_channel_t channel);
+static void UpdateTitle(void);
+static void App_UpdateTable(void);
+
+static BOOL copy_utf8_to_acp(char *destination, size_t capacity,
+                             const char *source)
+{
+    wchar_t wide[128];
+    if (!destination || !source || capacity == 0 || capacity > INT_MAX)
+        return FALSE;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1, wide,
+                            (int)(sizeof(wide) / sizeof(wide[0]))) <= 0)
+        return FALSE;
+    return WideCharToMultiByte(CP_ACP, 0, wide, -1, destination,
+                               (int)capacity, NULL, NULL) > 0;
+}
 
 static BOOL App_InitCommonControls(void)
 {
@@ -108,10 +144,22 @@ static const char *image_basename(const char *path)
 static void UpdateTitle(void)
 {
     char title[MAX_PATH + 128];
+    char dash[8] = "-";
+    if (!copy_utf8_to_acp(dash, sizeof(dash), "—"))
+        OutputDebugStringA("ROI Analyzer: could not convert the title dash to ANSI.\n");
     if (g_app.img.valid) {
-        _snprintf(title, sizeof(title), "ROI Analyzer - %s %dx%d [%s] [%s]",
-                  image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
-                  ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single");
+        if (g_current_exact)
+            _snprintf(title, sizeof(title),
+                      "ROI Analyzer - %s %dx%d [%d/%d] [%s] [%s]",
+                      image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
+                      g_app.file_idx + 1, g_app.files.count,
+                      ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single");
+        else
+            _snprintf(title, sizeof(title),
+                      "ROI Analyzer - %s %dx%d [%s/%d] [%s] [%s]",
+                      image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
+                      dash, g_app.files.count, ROI_ModeLabel(g_app.mode),
+                      g_app.multi ? "Multi" : "Single");
     } else {
         _snprintf(title, sizeof(title), "ROI Analyzer - (open or drop an image) [%s] [%s]",
                   ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single");
@@ -120,11 +168,22 @@ static void UpdateTitle(void)
     SetWindowTextA(g_app.hwnd_main, title);
 }
 
+double App_Ms(LARGE_INTEGER start)
+{
+    LARGE_INTEGER now;
+    if (!g_qpc_frequency.QuadPart || !QueryPerformanceCounter(&now))
+        return 0.0;
+    return (double)(now.QuadPart - start.QuadPart) * 1000.0 /
+           (double)g_qpc_frequency.QuadPart;
+}
+
 void App_UpdateStatus(void)
 {
-    char text[512];
     char cursor[128] = "cursor: outside image";
-    char selection[192] = "no ROI selected";
+    char mode[192];
+    char time[128];
+    char browsing[32];
+    const char *message;
     POINT screen, client, image_point;
 
     if (!g_app.hwnd_status)
@@ -142,32 +201,330 @@ void App_UpdateStatus(void)
                       (unsigned)pixel[2], (unsigned)pixel[1], (unsigned)pixel[0]);
         }
     }
-    if (g_app.rois.selected >= 0 && g_app.rois.selected < g_app.rois.count) {
-        const roi_result_t *r = &g_app.rois.items[g_app.rois.selected].res;
-        _snprintf(selection, sizeof(selection),
-                  "ROI %d: rect=(%d,%d)-(%d,%d) mean RGB=(%.2f,%.2f,%.2f)",
-                  ROI_SourceIndex(&g_app.rois, g_app.rois.selected) + 1,
-                  r->x0, r->y0, r->x1, r->y1,
-                  r->r_mean, r->g_mean, r->b_mean);
+    _snprintf(mode, sizeof(mode), "ROI:%d %s%s %.0f%%",
+              g_app.rois.count, ROI_ModeLabel(g_app.mode),
+              g_app.multi ? " Multi" : "", g_app.view.zoom * 100.0);
+    _snprintf(time, sizeof(time), "L%.0f A%.0f H%.0f P%.0f S%.0f D%.0f ms",
+              g_load_ms, g_analyze_ms, g_hist_ms, g_app.paint_ms,
+              g_show_ms, g_done_ms);
+    message = g_nav_status;
+    if (g_browsing) {
+        if (copy_utf8_to_acp(browsing, sizeof(browsing), "瀏覽中…"))
+            message = browsing;
+        else {
+            OutputDebugStringA("ROI Analyzer: could not convert the browsing status to ANSI.\n");
+            message = "Browsing...";
+        }
     }
-    _snprintf(text, sizeof(text), "%s  |  %s  |  ROI: %d  |  Mode: %s%s  |  Zoom: %.0f%%  |  Pan: (%d,%d)",
-              cursor, selection, g_app.rois.count, ROI_ModeLabel(g_app.mode),
-              g_app.multi ? " (multi)" : "", g_app.view.zoom * 100.0,
-              g_app.view.pan_x, g_app.view.pan_y);
-    text[sizeof(text) - 1] = '\0';
-    SendMessageA(g_app.hwnd_status, SB_SETTEXTA, 0, (LPARAM)text);
+    SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_POS, (LPARAM)cursor);
+    SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_MSG, (LPARAM)message);
+    SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_MODE, (LPARAM)mode);
+    App_StatusSetIndex();
+    SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_TIME, (LPARAM)time);
+}
+
+void App_StatusSetIndex(void)
+{
+    char dash[8] = "-";
+    if (!g_app.hwnd_status)
+        return;
+    if (!copy_utf8_to_acp(dash, sizeof(dash), "—"))
+        OutputDebugStringA("ROI Analyzer: could not convert the index dash to ANSI.\n");
+    if (g_current_exact && g_app.files.count > 0 &&
+        g_app.file_idx >= 0 && g_app.file_idx < g_app.files.count)
+        _snprintf(g_status_index, sizeof(g_status_index), "%d/%d",
+                  g_app.file_idx + 1, g_app.files.count);
+    else
+        _snprintf(g_status_index, sizeof(g_status_index), "%s/%d", dash,
+                  g_app.files.count);
+    g_status_index[sizeof(g_status_index) - 1] = '\0';
+    SendMessageA(g_app.hwnd_status, SB_SETTEXTA,
+                 SB_PART_INDEX | SBT_OWNERDRAW,
+                 (LPARAM)g_status_index);
+}
+
+void App_StatusLayout(void)
+{
+    RECT client;
+    int width, left = 220, mode = 200, index = 90, time = 260;
+    int minimum_left = 80, minimum_mode = 90, minimum_index = 45;
+    int minimum_time = 120;
+    int msg;
+    int parts[SB_PART_COUNT];
+    if (!g_app.hwnd_status)
+        return;
+    SendMessageA(g_app.hwnd_status, SB_SIMPLE, FALSE, 0);
+    GetClientRect(g_app.hwnd_status, &client);
+    width = client.right;
+    if (width < left + mode + index + time) {
+        int shortage = left + mode + index + time - width;
+        int reduce = time - minimum_time;
+        if (reduce > shortage) reduce = shortage;
+        time -= reduce;
+        shortage -= reduce;
+        reduce = mode - minimum_mode;
+        if (reduce > shortage) reduce = shortage;
+        mode -= reduce;
+        shortage -= reduce;
+        reduce = index - minimum_index;
+        if (reduce > shortage) reduce = shortage;
+        index -= reduce;
+        shortage -= reduce;
+        reduce = left - minimum_left;
+        if (reduce > shortage) reduce = shortage;
+        left -= reduce;
+    }
+    if (width < left + mode + index + time) {
+        left = width / 4;
+        mode = width / 4;
+        index = width / 5;
+        time = width - left - mode - index;
+    }
+    msg = width - left - mode - index - time;
+    if (msg < 0)
+        msg = 0;
+    parts[0] = left;
+    parts[1] = left + msg;
+    parts[2] = parts[1] + mode;
+    parts[3] = parts[2] + index;
+    parts[4] = -1;
+    SendMessageA(g_app.hwnd_status, SB_SETPARTS, SB_PART_COUNT, (LPARAM)parts);
+}
+
+void App_FlushPending(void)
+{
+    LARGE_INTEGER started;
+    if (!g_app.analysis_stale) {
+        g_browsing = FALSE;
+        return;
+    }
+    QueryPerformanceCounter(&started);
+    ROI_ReanalyzeAll(&g_app.rois, &g_app.img);
+    g_analyze_ms = App_Ms(started);
+    g_app.analysis_stale = FALSE;
+    g_browsing = FALSE;
+    if (strstr(g_nav_status, "ROI rebuilt"))
+        strcpy(g_nav_status, "Analysis complete; ROI rebuilt");
+    else if (strstr(g_nav_status, "ROI reused"))
+        strcpy(g_nav_status, "Analysis complete; ROI reused");
+    else
+        strcpy(g_nav_status, "Analysis complete");
+    App_RoiChanged();
+    g_done_ms = App_Ms(g_nav_started);
+    App_UpdateStatus();
+}
+
+static void App_UpdateTable(void)
+{
+    if (!g_app.hwnd_table)
+        return;
+    g_syncing_table = TRUE;
+    if (!Table_RebuildState(g_app.hwnd_table, &g_app.rois,
+                            ROI_ModeSource(g_app.table_page),
+                            g_app.analysis_stale))
+        MessageBoxA(g_app.hwnd_main, "Could not update the ROI table.",
+                    "ROI Analyzer", MB_OK | MB_ICONERROR);
+    g_syncing_table = FALSE;
+}
+
+BOOL App_NavKeyAllowed(const MSG *msg)
+{
+    char class_name[64];
+    if (!msg || !g_app.img.valid || g_app.drag.dragging ||
+        (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+        (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+        (GetKeyState(VK_MENU) & 0x8000) != 0 ||
+        GetAncestor(msg->hwnd, GA_ROOT) != g_app.hwnd_main)
+        return FALSE;
+    if (!GetClassNameA(msg->hwnd, class_name, (int)sizeof(class_name)))
+        return FALSE;
+    if (_stricmp(class_name, WC_COMBOBOXA) == 0 ||
+        _stricmp(class_name, WC_TABCONTROLA) == 0 ||
+        _stricmp(class_name, WC_EDITA) == 0)
+        return FALSE;
+    return TRUE;
+}
+
+static BOOL rebuild_navigation_grids(BOOL had_grid3, BOOL had_grid5, BOOL light)
+{
+    BOOL too_small = FALSE;
+    if (had_grid3) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_GRID3);
+        if (g_app.img.w < 3 || g_app.img.h < 3)
+            too_small = TRUE;
+        else if (!ROI_BuildGridPending(&g_app.rois, &g_app.img, 3))
+            MessageBoxA(g_app.hwnd_main, "Could not rebuild the 3x3 ROI grid.",
+                        "ROI Analyzer", MB_OK | MB_ICONERROR);
+    }
+    if (had_grid5) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_GRID5);
+        if (g_app.img.w < 5 || g_app.img.h < 5)
+            too_small = TRUE;
+        else if (!ROI_BuildGridPending(&g_app.rois, &g_app.img, 5))
+            MessageBoxA(g_app.hwnd_main, "Could not rebuild the 5x5 ROI grid.",
+                        "ROI Analyzer", MB_OK | MB_ICONERROR);
+    }
+    if (too_small && !light)
+        MessageBoxA(g_app.hwnd_main,
+                    "The image is too small for one or more existing grids; those grids were cleared.",
+                    "ROI Analyzer", MB_OK | MB_ICONINFORMATION);
+    return too_small;
+}
+
+void App_Navigate(int direction, BOOL light)
+{
+    image_t loaded, previous;
+    LARGE_INTEGER load_started, analyze_started, show_started;
+    BOOL exact = FALSE, same_size, had_grid3, had_grid5, grids_cleared = FALSE;
+    int current, target, skipped = 0, skipped_non_acp = 0;
+    char path[MAX_PATH];
+
+    if (direction != -1 && direction != 1)
+        return;
+    if (!g_app.img.valid)
+        return;
+    g_browsing = FALSE;
+    if (!light)
+        App_FlushPending();
+    if (g_app.drag.dragging) {
+        g_app.drag.dragging = FALSE;
+        ReleaseCapture();
+    }
+    Canvas_NavigationStarted();
+    QueryPerformanceCounter(&load_started);
+    g_nav_started = load_started;
+    g_analyze_ms = 0.0;
+    g_show_ms = 0.0;
+    g_done_ms = 0.0;
+    g_app.paint_ms = 0.0;
+    if (!FileList_Refresh(&g_app.files, g_app.img.path)) {
+        strcpy(g_nav_status, "Could not scan image folder");
+        g_load_ms = App_Ms(load_started);
+        App_UpdateStatus();
+        return;
+    }
+    current = FileList_Find(&g_app.files, image_basename(g_app.img.path), &exact);
+    if (current < 0) {
+        strcpy(g_nav_status, "Could not refresh image list");
+        g_load_ms = App_Ms(load_started);
+        App_UpdateStatus();
+        return;
+    }
+    g_app.file_idx = current;
+    g_current_exact = exact;
+    target = exact ? current + direction :
+             (direction > 0 ? current : current - 1);
+    if (target < 0 || target >= g_app.files.count) {
+        MessageBeep(MB_ICONWARNING);
+        strcpy(g_nav_status, direction > 0 ? "No next image" : "No previous image");
+        g_load_ms = App_Ms(load_started);
+        UpdateTitle();
+        App_UpdateStatus();
+        return;
+    }
+    ZeroMemory(&loaded, sizeof(loaded));
+    while (target >= 0 && target < g_app.files.count && skipped < 10) {
+        if (!FileList_Path(&g_app.files, target, path)) {
+            skipped_non_acp++;
+            target += direction;
+            continue;
+        }
+        if (g_app.files.cloud[target]) {
+            if (!copy_utf8_to_acp(g_nav_status, sizeof(g_nav_status),
+                                  "雲端檔案下載中…")) {
+                OutputDebugStringA("ROI Analyzer: could not convert the cloud status to ANSI.\n");
+                strcpy(g_nav_status, "Cloud file downloading...");
+            }
+            App_UpdateStatus();
+            UpdateWindow(g_app.hwnd_status);
+        }
+        if (Image_Load(&loaded, path) == 0)
+            break;
+        skipped++;
+        target += direction;
+    }
+    g_load_ms = App_Ms(load_started);
+    if (!loaded.valid) {
+        MessageBeep(MB_ICONWARNING);
+        if (skipped)
+            _snprintf(g_nav_status, sizeof(g_nav_status),
+                      "No loadable image (%d decode failures)", skipped);
+        else
+            strcpy(g_nav_status, "No representable image in that direction");
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+        UpdateTitle();
+        App_UpdateStatus();
+        return;
+    }
+
+    previous = g_app.img;
+    same_size = previous.w == loaded.w && previous.h == loaded.h;
+    had_grid3 = ROI_SourceCount(&g_app.rois, ROI_SRC_GRID3) > 0;
+    had_grid5 = ROI_SourceCount(&g_app.rois, ROI_SRC_GRID5) > 0;
+    ViewPyr_Free(&g_app.pyramid);
+    g_app.pyramid_attempted = FALSE;
+    g_app.pyramid_pending = FALSE;
+    g_app.img = loaded;
+    Image_Free(&previous);
+    g_app.img_gen++;
+    g_app.file_idx = target;
+    g_current_exact = TRUE;
+    g_app.analysis_stale = TRUE;
+    g_browsing = light;
+    if (!same_size) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_MANUAL);
+        grids_cleared = rebuild_navigation_grids(had_grid3, had_grid5, light);
+        ROI_SetSelected(&g_app.rois, -1);
+        if (g_app.hwnd_canvas) {
+            RECT rc;
+            GetClientRect(g_app.hwnd_canvas, &rc);
+            View_Reset(&g_app.view, &g_app.img, rc.right, rc.bottom);
+        } else {
+            View_Reset(&g_app.view, &g_app.img, 0, 0);
+        }
+    }
+    if (skipped || skipped_non_acp) {
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  "Loaded (%s); %s with skips (decode:%d non-ACP:%d)",
+                  g_app.img.decoder, same_size ? "ROI reused" : "ROI rebuilt",
+                  skipped, skipped_non_acp);
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+    } else {
+        _snprintf(g_nav_status, sizeof(g_nav_status), "Loaded (%s); %s%s",
+                  g_app.img.decoder, same_size ? "ROI reused" : "ROI rebuilt",
+                  grids_cleared ? "; small-image grids cleared" : "");
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+    }
+    UpdateTitle();
+    App_StatusSetIndex();
+    App_UpdateStatus();
+    g_app.paint_pending = TRUE;
+    QueryPerformanceCounter(&show_started);
+    if (g_app.hwnd_canvas) {
+        InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+        UpdateWindow(g_app.hwnd_canvas);
+    }
+    g_show_ms = App_Ms(show_started);
+    if (light)
+        Canvas_BuildPyramidNow();
+
+    if (!light) {
+        QueryPerformanceCounter(&analyze_started);
+        ROI_ReanalyzeAll(&g_app.rois, &g_app.img);
+        g_analyze_ms = App_Ms(analyze_started);
+        g_app.analysis_stale = FALSE;
+        g_browsing = FALSE;
+    }
+    App_UpdateTable();
+    App_UpdateHistogram();
+    if (!light)
+        g_done_ms = App_Ms(g_nav_started);
+    App_UpdateStatus();
 }
 
 void App_RoiChanged(void)
 {
-    if (g_app.hwnd_table) {
-        g_syncing_table = TRUE;
-        if (!Table_Rebuild(g_app.hwnd_table, &g_app.rois,
-                           ROI_ModeSource(g_app.table_page)))
-            MessageBoxA(g_app.hwnd_main, "Could not update the ROI table.",
-                        "ROI Analyzer", MB_OK | MB_ICONERROR);
-        g_syncing_table = FALSE;
-    }
+    App_UpdateTable();
     if (g_app.hwnd_canvas)
         InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
     App_UpdateHistogram();
@@ -177,15 +534,19 @@ void App_RoiChanged(void)
 void App_UpdateHistogram(void)
 {
     wchar_t label[160];
-    if (!g_app.show_hist || !g_app.hwnd_hist)
+    LARGE_INTEGER started;
+    QueryPerformanceCounter(&started);
+    if (!g_app.show_hist || !g_app.hwnd_hist) {
+        g_hist_ms = App_Ms(started);
         return;
+    }
     if (!g_app.img.valid) {
         HistPanel_ClearSource(g_app.hwnd_hist);
+        g_hist_ms = App_Ms(started);
         return;
     }
     if (g_app.rois.selected >= 0 && g_app.rois.selected < g_app.rois.count) {
         const roi_item_t *item = &g_app.rois.items[g_app.rois.selected];
-        const roi_result_t *result = &item->res;
         wchar_t mode_label[32];
         const char *mode_ascii;
         int number = ROI_SourceIndex(&g_app.rois, g_app.rois.selected) + 1;
@@ -200,15 +561,30 @@ void App_UpdateHistogram(void)
             mode_label[0] = L'\0';
         swprintf(label, sizeof(label) / sizeof(label[0]),
                  L"%ls #%d (%d,%d)-(%d,%d)", mode_label, number,
-                 result->x0, result->y0, result->x1, result->y1);
-        HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, &item->rc, label,
-                            g_app.img_gen);
+                 item->rc.left, item->rc.top, item->rc.right, item->rc.bottom);
+        if (g_app.analysis_stale) {
+            wcsncat(label, L" (pending)",
+                    sizeof(label) / sizeof(label[0]) -
+                    wcslen(label) - 1);
+            HistPanel_SetLabel(g_app.hwnd_hist, label);
+        } else {
+            HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, &item->rc, label,
+                                g_app.img_gen);
+        }
     } else {
         swprintf(label, sizeof(label) / sizeof(label[0]),
                  L"Entire Image (%dx%d)", g_app.img.w, g_app.img.h);
-        HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, NULL, label,
-                            g_app.img_gen);
+        if (g_app.analysis_stale) {
+            wcsncat(label, L" (pending)",
+                    sizeof(label) / sizeof(label[0]) -
+                    wcslen(label) - 1);
+            HistPanel_SetLabel(g_app.hwnd_hist, label);
+        } else {
+            HistPanel_SetSource(g_app.hwnd_hist, &g_app.img, NULL, label,
+                                g_app.img_gen);
+        }
     }
+    g_hist_ms = App_Ms(started);
 }
 
 void App_PreviewHistogram(RECT img_rc)
@@ -331,6 +707,7 @@ static void Layout(void)
         !g_app.hwnd_table || !g_app.hwnd_tabs || !g_app.hwnd_hist)
         return;
     SendMessage(g_app.hwnd_status, WM_SIZE, 0, 0);
+    App_StatusLayout();
     GetClientRect(g_app.hwnd_main, &client);
     GetWindowRect(g_app.hwnd_status, &status_rect);
     status_height = status_rect.bottom - status_rect.top;
@@ -392,6 +769,7 @@ static void OpenImageFile(const char *path)
     memset(&loaded, 0, sizeof(loaded));
     if (!path || !path[0])
         return;
+    App_FlushPending();
     if (Image_Load(&loaded, path) != 0) {
         MessageBoxA(g_app.hwnd_main, "Cannot load image (PNG/JPG/BMP only).",
                     "Open", MB_OK | MB_ICONWARNING);
@@ -401,6 +779,33 @@ static void OpenImageFile(const char *path)
     g_app.img = loaded;
     ROI_Clear(&g_app.rois, &g_app.drag);
     g_app.img_gen++;
+    g_app.analysis_stale = FALSE;
+    g_app.file_idx = -1;
+    g_current_exact = FALSE;
+    ViewPyr_Free(&g_app.pyramid);
+    g_app.pyramid_attempted = FALSE;
+    g_app.pyramid_pending = FALSE;
+    if (FileList_Refresh(&g_app.files, g_app.img.path)) {
+        g_app.file_idx = FileList_Find(&g_app.files,
+                                       image_basename(g_app.img.path),
+                                       &g_current_exact);
+        if (g_app.file_idx < 0) {
+            _snprintf(g_nav_status, sizeof(g_nav_status),
+                      "Loaded (%s); folder list refresh failed",
+                      g_app.img.decoder);
+            FileList_Free(&g_app.files);
+        }
+    } else {
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  "Loaded (%s); folder scan failed", g_app.img.decoder);
+        FileList_Free(&g_app.files);
+    }
+    if (g_current_exact)
+        _snprintf(g_nav_status, sizeof(g_nav_status), "Loaded (%s)",
+                  g_app.img.decoder);
+    else if (g_app.files.scanned)
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  "Loaded (%s); not in folder list", g_app.img.decoder);
     if (g_app.hwnd_canvas) {
         RECT canvas_rect;
         GetClientRect(g_app.hwnd_canvas, &canvas_rect);
@@ -422,6 +827,7 @@ static void OpenImageFile(const char *path)
     }
     Layout();
     UpdateTitle();
+    App_StatusSetIndex();
     App_RoiChanged();
 }
 
@@ -475,7 +881,9 @@ static void ExportCurrent(void)
         }
     }
     status[sizeof(status) - 1] = '\0';
-    SendMessageA(g_app.hwnd_status, SB_SETTEXTA, 0, (LPARAM)status);
+    strncpy(g_nav_status, status, sizeof(g_nav_status) - 1);
+    g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+    App_UpdateStatus();
 }
 
 static void OpenLogFile(void)
@@ -642,14 +1050,36 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         Layout();
         App_UpdateStatus();
         return 0;
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
+        if (draw && draw->hwndItem == g_app.hwnd_status &&
+            draw->itemID == SB_PART_INDEX) {
+            const char *text = (const char *)draw->itemData;
+            FillRect(draw->hDC, &draw->rcItem, GetSysColorBrush(COLOR_3DFACE));
+            SetBkMode(draw->hDC, TRANSPARENT);
+            DrawTextA(draw->hDC, text ? text : "", -1, &draw->rcItem,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_ACTIVATE:
+        if (LOWORD(wparam) == WA_INACTIVE)
+            App_FlushPending();
+        break;
     case WM_COMMAND: {
         int id = LOWORD(wparam);
+        App_FlushPending();
         if (id == IDM_OPEN)
             OpenImageDialog();
         else if (id == IDM_EXPORT || id == IDC_EXPORT)
             ExportCurrent();
         else if (id == IDM_EXIT)
             DestroyWindow(hwnd);
+        else if (id == IDM_PREVIOUS)
+            App_Navigate(-1, FALSE);
+        else if (id == IDM_NEXT)
+            App_Navigate(1, FALSE);
         else if (id == IDM_DRAG)
             SetMode(MODE_DRAG);
         else if (id == IDM_GRID3)
@@ -752,6 +1182,8 @@ static HMENU CreateMainMenu(void)
     HMENU view = CreatePopupMenu();
 
     AppendMenuA(file, MF_STRING, IDM_OPEN, "Open...\tO");
+    AppendMenuA(file, MF_STRING, IDM_PREVIOUS, "Previous Image");
+    AppendMenuA(file, MF_STRING, IDM_NEXT, "Next Image");
     AppendMenuA(file, MF_STRING, IDM_EXPORT, "Export Log\tCtrl+E");
     AppendMenuA(file, MF_SEPARATOR, 0, NULL);
     AppendMenuA(file, MF_STRING, IDM_EXIT, "Exit");
@@ -800,13 +1232,23 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     MSG msg;
     int screen_width, screen_height, width, height, x, y;
     int result;
+    DWORD s_nav_done_tick;
+    HRESULT com_result;
 
     (void)previous;
     memset(&g_app, 0, sizeof(g_app));
+    g_app.file_idx = -1;
+    com_result = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(com_result)) {
+        MessageBoxA(NULL, "COM initialization failed.", "ROI Analyzer",
+                    MB_OK | MB_ICONERROR);
+        return 1;
+    }
     g_app.mode = MODE_DRAG;
     g_app.table_page = MODE_DRAG;
     g_app.show_hist = TRUE;
     g_app.view.zoom = 1.0f;
+    QueryPerformanceFrequency(&g_qpc_frequency);
     ROI_Init(&g_app.rois, &g_app.drag);
     App_InitCommonControls();
     {
@@ -814,6 +1256,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         if (GdiplusStartup(&g_gdiplus, &input, NULL) != Ok) {
             MessageBoxA(NULL, "GDI+ initialization failed.", "ROI Analyzer",
                         MB_OK | MB_ICONERROR);
+            CoUninitialize();
             return 1;
         }
     }
@@ -825,6 +1268,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
                  (unsigned long)error);
         MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
         GdiplusShutdown(g_gdiplus);
+        CoUninitialize();
         return 1;
     }
     if (!HistPanel_Register(instance)) {
@@ -835,6 +1279,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
                  (unsigned long)error);
         MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
         GdiplusShutdown(g_gdiplus);
+        CoUninitialize();
         return 1;
     }
     ZeroMemory(&wc, sizeof(wc));
@@ -847,6 +1292,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         MessageBoxA(NULL, "Could not register the main window class.",
                     "ROI Analyzer", MB_OK | MB_ICONERROR);
         GdiplusShutdown(g_gdiplus);
+        CoUninitialize();
         return 1;
     }
     menu = CreateMainMenu();
@@ -867,6 +1313,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
             ReportCreateWindowFailureA("main window");
         ROI_Destroy(&g_app.rois);
         GdiplusShutdown(g_gdiplus);
+        CoUninitialize();
         return 1;
     }
     ShowWindow(g_app.hwnd_main, show);
@@ -884,7 +1331,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         }
         OpenImageFile(path);
     }
+    s_nav_done_tick = GetTickCount();
     while ((result = GetMessageA(&msg, NULL, 0, 0)) > 0) {
+        if (msg.message == WM_KEYUP &&
+            (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT))
+            App_FlushPending();
+        if (msg.message == WM_KEYDOWN &&
+            (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) &&
+            App_NavKeyAllowed(&msg)) {
+            BOOL repeat = (msg.lParam & (1L << 30)) != 0;
+            if (repeat && (LONG)(msg.time - s_nav_done_tick) < 0)
+                continue;
+            App_Navigate(msg.wParam == VK_LEFT ? -1 : 1, repeat);
+            s_nav_done_tick = GetTickCount();
+            continue;
+        }
         if (!TranslateAcceleratorA(g_app.hwnd_main, g_accelerators, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
@@ -893,7 +1354,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     if (g_accelerators)
         DestroyAcceleratorTable(g_accelerators);
     Image_Free(&g_app.img);
+    ViewPyr_Free(&g_app.pyramid);
+    FileList_Free(&g_app.files);
     ROI_Destroy(&g_app.rois);
     GdiplusShutdown(g_gdiplus);
+    CoUninitialize();
     return result == -1 ? 1 : (int)msg.wParam;
 }

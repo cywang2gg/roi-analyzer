@@ -1,9 +1,114 @@
 #include "view.h"
 
 #include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "image.h"
+
+void ViewPyr_Free(view_pyr_t *pyramid)
+{
+    int i;
+    if (!pyramid)
+        return;
+    for (i = 0; i < pyramid->count; i++)
+        if (pyramid->levels[i].owned)
+            free(pyramid->levels[i].px);
+    memset(pyramid, 0, sizeof(*pyramid));
+}
+
+BOOL ViewPyr_Build(view_pyr_t *pyramid, const image_t *img)
+{
+    int i;
+    if (!pyramid || !img || !img->valid || !img->px ||
+        img->w <= 0 || img->h <= 0 || img->pitch < img->w * 4)
+        return FALSE;
+    ViewPyr_Free(pyramid);
+    pyramid->levels[0].px = img->px;
+    pyramid->levels[0].w = img->w;
+    pyramid->levels[0].h = img->h;
+    pyramid->levels[0].pitch = img->pitch;
+    pyramid->count = 1;
+    for (i = 1; i < VIEW_MAX_LEVELS; i++) {
+        const view_level_t *previous = &pyramid->levels[i - 1];
+        view_level_t *level = &pyramid->levels[i];
+        size_t bytes;
+        int x, y;
+        level->w = (previous->w + 1) / 2;
+        level->h = (previous->h + 1) / 2;
+        if (level->w == previous->w && level->h == previous->h)
+            break;
+        if ((size_t)level->w > SIZE_MAX / 4 ||
+            (size_t)level->w * 4 > SIZE_MAX / (size_t)level->h) {
+            ViewPyr_Free(pyramid);
+            return FALSE;
+        }
+        level->pitch = level->w * 4;
+        bytes = (size_t)level->pitch * (size_t)level->h;
+        level->px = (unsigned char *)malloc(bytes);
+        if (!level->px) {
+            ViewPyr_Free(pyramid);
+            return FALSE;
+        }
+        level->owned = TRUE;
+        for (y = 0; y < level->h; y++) {
+            unsigned char *destination = level->px + (size_t)y * level->pitch;
+            int sy, sx;
+            for (x = 0; x < level->w; x++) {
+                unsigned int sum[4] = { 0, 0, 0, 0 };
+                unsigned int samples = 0;
+                int dy, dx;
+                for (dy = 0; dy < 2; dy++) {
+                    sy = y * 2 + dy;
+                    if (sy >= previous->h)
+                        continue;
+                    for (dx = 0; dx < 2; dx++) {
+                        const unsigned char *source;
+                        sx = x * 2 + dx;
+                        if (sx >= previous->w)
+                            continue;
+                        source = previous->px + (size_t)sy * previous->pitch +
+                                 (size_t)sx * 4;
+                        sum[0] += source[0];
+                        sum[1] += source[1];
+                        sum[2] += source[2];
+                        sum[3] += source[3];
+                        samples++;
+                    }
+                }
+                destination[x * 4 + 0] =
+                    (unsigned char)((sum[0] + samples / 2) / samples);
+                destination[x * 4 + 1] =
+                    (unsigned char)((sum[1] + samples / 2) / samples);
+                destination[x * 4 + 2] =
+                    (unsigned char)((sum[2] + samples / 2) / samples);
+                destination[x * 4 + 3] =
+                    (unsigned char)((sum[3] + samples / 2) / samples);
+            }
+        }
+        pyramid->count++;
+    }
+    return TRUE;
+}
+
+const view_level_t *ViewPyr_Pick(const view_pyr_t *pyramid,
+                                 int draw_w, int draw_h, BOOL nearest)
+{
+    int i, picked = 0;
+    if (!pyramid || pyramid->count <= 0)
+        return NULL;
+    if (nearest)
+        return &pyramid->levels[0];
+    for (i = 1; i < pyramid->count; i++) {
+        const view_level_t *level = &pyramid->levels[i];
+        if (level->w >= draw_w && level->h >= draw_h)
+            picked = i;
+        else
+            break;
+    }
+    return &pyramid->levels[picked];
+}
 
 static int add_saturated(int value, int delta)
 {
@@ -162,24 +267,83 @@ void View_RectToWindow(const view_t *v, RECT image_rect, RECT *window_rect)
 
 void View_DrawImage(HDC hdc, const view_t *v, const image_t *img)
 {
+    view_level_t level;
+    view_pyr_t pyramid;
+    if (!img || !img->valid || !img->px)
+        return;
+    memset(&level, 0, sizeof(level));
+    level.px = img->px;
+    level.w = img->w;
+    level.h = img->h;
+    level.pitch = img->pitch;
+    memset(&pyramid, 0, sizeof(pyramid));
+    pyramid.levels[0] = level;
+    pyramid.count = 1;
+    View_DrawImagePyramid(hdc, v, img, &pyramid);
+}
+
+void View_DrawImagePyramid(HDC hdc, const view_t *v, const image_t *img,
+                           const view_pyr_t *pyramid)
+{
     BITMAPINFO bmi;
+    const view_level_t *level;
+    RECT visible;
+    BOOL nearest;
 
     if (!hdc || !v || !img || !img->valid || !img->px)
         return;
     if (v->draw_w <= 0 || v->draw_h <= 0)
         return;
+    nearest = v->zoom > 1.0f;
+    level = ViewPyr_Pick(pyramid, v->draw_w, v->draw_h, nearest);
+    if (!level)
+        return;
 
     memset(&bmi, 0, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = img->w;
-    bmi.bmiHeader.biHeight = -img->h; /* top-down: px[0] is the top row */
+    bmi.bmiHeader.biWidth = level->w;
+    bmi.bmiHeader.biHeight = -level->h;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    SetStretchBltMode(hdc, HALFTONE);
-    SetBrushOrgEx(hdc, 0, 0, NULL);
-    StretchDIBits(hdc, v->off_x, v->off_y, v->draw_w, v->draw_h,
-                  0, 0, img->w, img->h,
-                  img->px, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    visible.left = v->off_x;
+    visible.top = v->off_y;
+    visible.right = v->off_x + v->draw_w;
+    visible.bottom = v->off_y + v->draw_h;
+    if (GetClipBox(hdc, &visible) == ERROR)
+        return;
+    {
+        RECT image_rect;
+        image_rect.left = v->off_x;
+        image_rect.top = v->off_y;
+        image_rect.right = v->off_x + v->draw_w;
+        image_rect.bottom = v->off_y + v->draw_h;
+        if (!IntersectRect(&visible, &visible, &image_rect))
+            return;
+    }
+    SetStretchBltMode(hdc, nearest ? COLORONCOLOR : HALFTONE);
+    if (!nearest)
+        SetBrushOrgEx(hdc, 0, 0, NULL);
+    if (nearest) {
+        int sx0 = (int)(((double)(visible.left - v->off_x) * level->w) /
+                        v->draw_w);
+        int sy0 = (int)(((double)(visible.top - v->off_y) * level->h) /
+                        v->draw_h);
+        int sx1 = (int)(((double)(visible.right - v->off_x) * level->w +
+                         v->draw_w - 1) / v->draw_w);
+        int sy1 = (int)(((double)(visible.bottom - v->off_y) * level->h +
+                         v->draw_h - 1) / v->draw_h);
+        if (sx1 > level->w) sx1 = level->w;
+        if (sy1 > level->h) sy1 = level->h;
+        StretchDIBits(hdc, visible.left, visible.top,
+                      visible.right - visible.left,
+                      visible.bottom - visible.top,
+                      sx0, sy0, sx1 - sx0, sy1 - sy0,
+                      level->px, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        StretchDIBits(hdc, v->off_x, v->off_y, v->draw_w, v->draw_h,
+                      0, 0, level->w, level->h,
+                      level->px, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    }
 }

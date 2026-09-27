@@ -1,9 +1,49 @@
 #include "analyze.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "image.h"
+
+#define ANALYZE_ROW_U32_MAX_W 66051
+
+typedef struct {
+    uint32_t r, g, b, rr, gg, bb, rg, rb, gb;
+} acc9_t;
+
+static void acc_rect(const image_t *img, int x0, int y0, int x1, int y1,
+                     uint64_t totals[9])
+{
+    int y, x;
+    for (y = y0; y <= y1; y++) {
+        const unsigned char *row = img->px + (size_t)y * (size_t)img->pitch;
+        acc9_t line = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        for (x = x0; x <= x1; x++) {
+            uint32_t b = row[x * 4 + 0];
+            uint32_t g = row[x * 4 + 1];
+            uint32_t r = row[x * 4 + 2];
+            line.r += r;
+            line.g += g;
+            line.b += b;
+            line.rr += r * r;
+            line.gg += g * g;
+            line.bb += b * b;
+            line.rg += r * g;
+            line.rb += r * b;
+            line.gb += g * b;
+        }
+        totals[0] += line.r;
+        totals[1] += line.g;
+        totals[2] += line.b;
+        totals[3] += line.rr;
+        totals[4] += line.gg;
+        totals[5] += line.bb;
+        totals[6] += line.rg;
+        totals[7] += line.rb;
+        totals[8] += line.gb;
+    }
+}
 
 void rgb_to_lab_f(float r, float g, float b, float *l, float *a, float *bl)
 {
@@ -31,9 +71,11 @@ void rgb_to_lab_f(float r, float g, float b, float *l, float *a, float *bl)
 void AnalyzeROI(const image_t *img, RECT rc, roi_result_t *out)
 {
     int x0, y0, x1, y1, t;
-    int x, y, n = 0;
+    int x, y, n;
     double sr = 0.0, sg = 0.0, sb = 0.0, sy = 0.0;
     double sr2 = 0.0, sg2 = 0.0, sb2 = 0.0, sy2 = 0.0;
+    double srg = 0.0, srb = 0.0, sgb = 0.0;
+    int width;
     double var;
     float fl, fa, fb;
 
@@ -69,23 +111,43 @@ void AnalyzeROI(const image_t *img, RECT rc, roi_result_t *out)
     if (x1 < x0 || y1 < y0)
         return;
 
-    for (y = y0; y <= y1; y++) {
-        const unsigned char *row = img->px + (size_t)y * (size_t)img->pitch;
-        for (x = x0; x <= x1; x++) {
-            /* px layout is BGRA. */
-            double b = (double)row[x * 4 + 0];
-            double g = (double)row[x * 4 + 1];
-            double r = (double)row[x * 4 + 2];
-            double yy = 0.299 * r + 0.587 * g + 0.114 * b;
-            sr += r;
-            sg += g;
-            sb += b;
-            sy += yy;
-            sr2 += r * r;
-            sg2 += g * g;
-            sb2 += b * b;
-            sy2 += yy * yy;
-            n++;
+    width = x1 - x0 + 1;
+    n = (x1 - x0 + 1) * (y1 - y0 + 1);
+    if (width <= ANALYZE_ROW_U32_MAX_W) {
+        uint64_t totals[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        const double a = 0.299, b = 0.587, c = 0.114;
+        acc_rect(img, x0, y0, x1, y1, totals);
+        sr = (double)totals[0];
+        sg = (double)totals[1];
+        sb = (double)totals[2];
+        sr2 = (double)totals[3];
+        sg2 = (double)totals[4];
+        sb2 = (double)totals[5];
+        srg = (double)totals[6];
+        srb = (double)totals[7];
+        sgb = (double)totals[8];
+        sy = a * sr + b * sg + c * sb;
+        sy2 = a * a * sr2 + b * b * sg2 + c * c * sb2 +
+              2.0 * a * b * srg + 2.0 * a * c * srb + 2.0 * b * c * sgb;
+    } else {
+        n = 0;
+        for (y = y0; y <= y1; y++) {
+            const unsigned char *row = img->px + (size_t)y * (size_t)img->pitch;
+            for (x = x0; x <= x1; x++) {
+                double b = (double)row[x * 4 + 0];
+                double g = (double)row[x * 4 + 1];
+                double r = (double)row[x * 4 + 2];
+                double yy = 0.299 * r + 0.587 * g + 0.114 * b;
+                sr += r;
+                sg += g;
+                sb += b;
+                sy += yy;
+                sr2 += r * r;
+                sg2 += g * g;
+                sb2 += b * b;
+                sy2 += yy * yy;
+                n++;
+            }
         }
     }
     if (n <= 0)

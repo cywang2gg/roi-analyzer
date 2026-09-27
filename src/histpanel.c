@@ -749,6 +749,21 @@ void HistPanel_SetSource(HWND hwnd, const image_t *img, const RECT *rc,
     InvalidateRect(hwnd, NULL, FALSE);
 }
 
+void HistPanel_SetLabel(HWND hwnd, const wchar_t *label)
+{
+    hist_panel_t *panel = panel_state(hwnd);
+    if (!panel)
+        return;
+    if (label) {
+        wcsncpy(panel->label, label,
+                sizeof(panel->label) / sizeof(panel->label[0]) - 1);
+        panel->label[sizeof(panel->label) / sizeof(panel->label[0]) - 1] = L'\0';
+    } else {
+        panel->label[0] = L'\0';
+    }
+    InvalidateRect(hwnd, NULL, FALSE);
+}
+
 void HistPanel_ClearSource(HWND hwnd)
 {
     hist_panel_t *panel = panel_state(hwnd);

@@ -1,9 +1,11 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.4 | 日期：2026-09-27 | Histogram 面板、拖曳即時預覽、啟動 manifest 修正
+> 版本：v2.6 | 日期：2026-09-27 | 五欄狀態列、WIC、影像金字塔、先顯示後分析與整數累加
 
 ## 變更歷史
 
+- **v2.6（2026-09-27）**：狀態列改為游標／訊息／ROI 模式／影像索引／耗時五欄；支援雲端佔位檔提示、WIC 優先解碼與 GDI+ fallback、延遲建立顯示金字塔、先顯示影像再分析，以及以整數逐列累加 RGB／Y 統計。放大使用可見原圖區域與最近鄰顯示；分析、直方圖及游標取色仍使用原圖。
+- **v2.5（2026-09-27）**：加入同資料夾上一張／下一張、自然排序與目錄 mtime 快取；同解析度沿用 ROI、不同解析度重建既有格線；長按方向鍵延後 ROI／直方圖重算。GRID3 與 GRID5 同時存在時，ROI 分析約需兩次全圖掃描；耗時估計以 Release 實測為準。
 - **v2.4（2026-09-27）**：右側 Histogram 面板（通道／Log／hover／範圍選取）；DRAG 拖曳中 80ms 節流即時預覽；面板閃爍修正（hover 比對、無背景擦除、分層快取）；啟動改用 comctl32 v6 manifest 並精簡 ICC 旗標。
 
 - **v2.3（2026-09-26）**：格線按模式互斥顯示（GRID3 僅 3×3、GRID5 僅 5×5、DRAG 不顯示）；手動框在所有模式顯示於格線上方（先畫格線後畫手動框）。
@@ -20,7 +22,7 @@
 
 - 開啟或拖放 PNG、JPG、BMP 影像；影像依畫布大小等比例縮放並置中，視窗調整大小時同步更新。
 - 手動拖曳矩形建立 ROI，支援單選新增（取代現有清單）與複選新增（累加）。
-- 支援以右鍵拖曳或方向鍵平移影像；平移時影像不可完全移出畫布。
+- 支援以右鍵拖曳或 `Ctrl`+方向鍵平移影像；平移時影像不可完全移出畫布。
 - 將整張影像等分為 3×3 或 5×5 區塊；每個區塊都是一個 ROI，並在畫布顯示格線。
 - 支援影像放大與縮小；手動 ROI 與分區 ROI 可同時存在。
 - 在 ROI 上依清單順序標示 1 至 n；每個 ROI 的分析數值以一列顯示於主視窗的 Grid 表格。
@@ -38,8 +40,10 @@ roi-analyzer/
 │   ├── main.c         # WinMain、主視窗、選單、版面配置、訊息分派
 │   ├── app.h          # 全域狀態 app_t
 │   ├── canvas.h/.c    # 畫布子視窗：影像、ROI 疊圖與滑鼠事件
-│   ├── image.h/.c     # 圖檔載入為 32 位元 BGRA 緩衝區
-│   ├── view.h/.c      # 縮放、置中與視窗／影像座標換算
+│   ├── filelist.h/.c  # 同資料夾影像清單、自然排序、雲端屬性與索引
+│   ├── image.h/.c     # WIC 優先、GDI+ fallback，解碼為 32 位元 BGRA
+│   ├── image_wic.c    # WIC 記憶體解碼與 BGRA CopyPixels
+│   ├── view.h/.c      # 縮放、金字塔繪製與視窗／影像座標換算
 │   ├── roi.h/.c       # ROI 清單、拖曳狀態機與 3×3／5×5 分區
 │   ├── analyze.h/.c   # mean／std 與 Lab 計算
 │   ├── histogram.h/.c # 直方圖統計（純計算，不依賴 GUI）
@@ -56,12 +60,12 @@ roi-analyzer/
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 3,500 行 C 程式碼，無第三方依賴；使用 Win32、GDI+ 與系統內建 Common Controls。
+預估約 3,500 行 C 程式碼，無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 
 ```c
-// image.h — GDI+ 載入並轉為 32 位元 BGRA 的影像緩衝區
+// image.h — WIC 優先、GDI+ fallback，轉為 32 位元 BGRA 的影像緩衝區
 typedef struct {
     unsigned char *px;      // BGRA，每像素 4 位元組
     int w, h, pitch;        // pitch = w * 4
@@ -128,16 +132,30 @@ typedef struct {
     HWND hwnd_btn_export, hwnd_btn_clear, hwnd_chk_multi;
     image_t img;
     view_t view;
+    view_pyr_t pyramid;      // 顯示金字塔（lazy 建，pyramid_gen 綁 img_gen）
+    filelist_t files;        // 同資料夾清單；file_idx 為目前索引（-1=不在清單）
+    int file_idx;
     roi_list_t rois;
     drag_state_t drag;
     roi_mode_t mode;
-    roi_mode_t table_page;  // 目前表格頁籤所代表的 ROI 來源
-    BOOL multi;             // 手動框選的複選新增模式
-    BOOL show_hist;         // Histogram 面板是否顯示；預設 TRUE
-    unsigned int img_gen;   // 每次 Image_Load 成功就 +1（直方圖快取鍵）
-} app_t;
+    roi_mode_t table_page;
+    BOOL multi;
+    BOOL show_hist;
+    BOOL analysis_stale;     // 長按瀏覽：影像已換、分析待補
+    unsigned int img_gen;    // 每次 Image_Load 成功就 +1（直方圖快取鍵）
+} app_t;                     // 示意；實際欄位見 app.h
 
 extern app_t g_app;
+```
+
+```c
+// filelist.h — 同資料夾影像清單（W 掃描、自然排序、mtime 快取）
+// 公開 API 保持 char；內部以 FindFirstFileW 掃描，寬字元預轉後 StrCmpLogicalW 排序。
+// 每筆記錄 cloud 旗標（RECALL_ON_DATA_ACCESS / RECALL_ON_OPEN / OFFLINE），
+// 導覽到雲端佔位檔前先顯示「雲端檔案下載中…」。
+// FileList_Refresh：同目錄且 GetFileAttributesExA mtime 未變則沿用（約 0.01ms），
+// 否則重掃；Find 找不到（!exact）時強制重掃一次再定位。
+// FileList_Free 後清空 scanned，避免 mtime 快取誤判命中。
 ```
 
 同步入口（定義於 `main.c`）：
@@ -156,11 +174,12 @@ extern app_t g_app;
 | main | `WinMain`、`MainWndProc`、`Layout()` | 建立主視窗、選單與子控制項；處理 `WM_SIZE`、`WM_COMMAND`、`WM_NOTIFY` 與 `WM_DROPFILES`；提供 `App_*` 同步入口 |
 | histogram | `Hist_Compute()`、`Hist_RangeStats()` | 純計算：256-bin 統計、mean／std／median、範圍統計；不依賴 GUI |
 | histpanel | `HistPanel_Register/Create/SetSource/ClearSource/SetChannel/SetLogScale` | 右側面板子視窗；三層快取（base／ramp／back）雙緩衝繪製；hover 比對＋子區域重繪；詳見 `01_histogram_arch.md` |
-| canvas | `Canvas_Register()`、`CanvasWndProc` | 畫布子視窗；雙緩衝繪製影像、ROI、編號、格線與橡皮筋；處理左鍵 ROI 與右鍵平移事件並呼叫相關模組 |
-| image | `Image_Load(img, path)`、`Image_Free(img)` | GDI+ `FromFile` → `LockBits(PixelFormat32bppARGB)` → 複製到 `px`；記憶體中的像素順序為 BGRA |
-| view | `View_Update()`、`View_Pan()`、`View_Reset()`、`View_SetZoom()`、`View_ToImage()`、`View_ToWindow()`、`View_RectToWindow()` | 依 fit、zoom 與 pan 定位影像、限制平移邊界並換算座標；座標換算後限制在 `[0, w-1]` 與 `[0, h-1]` |
+| canvas | `Canvas_Register()`、`CanvasWndProc` | 畫布子視窗；雙緩衝繪製影像、ROI、編號、格線與橡皮筋；首次 paint 後延遲建立金字塔，處理左鍵 ROI 與右鍵平移 |
+| filelist | `FileList_Scan/Refresh/Find/Path/Free()` | 同資料夾影像自然排序清單；記錄 ANSI 路徑可用性及雲端佔位檔屬性 |
+| image | `Image_Load(img, path)`、`Image_Free(img)` | WIC 將整檔讀入記憶體後解碼並 `CopyPixels` 為 BGRA；WIC 失敗則 fallback 至 GDI+ `LockBits` |
+| view | `ViewPyr_Build/Free/Pick()`、`View_DrawImagePyramid()` 與座標換算函式 | 延遲建立最多六層 2×2 平均金字塔；縮小選用仍不低於顯示尺寸的最小層，放大以原圖可見子矩形及 COLORONCOLOR 繪製 |
 | roi | `ROI_Clear()`、`ROI_ClearSource()`、`ROI_Add()`、`ROI_Remove()`、`ROI_BuildGrid(n)`、`ROI_HitTest()`、`ROI_OnLDown/Move/LUp()` | 管理帶來源標籤的共用 ROI 清單、建立分區、命中測試與拖曳狀態機（見 §5） |
-| analyze | `AnalyzeROI(img, rc, out)` | 單次走訪計算總和與平方和，再計算平均值及母體標準差；Y 使用 BT.601，Lab 使用 D65 |
+| analyze | `AnalyzeROI(img, rc, out)` | 逐列以 32 位元整數累加 RGB、平方與交叉項，再併入 64 位元總和；寬度超過 66051 時使用 64 位元逐像素 fallback；Y 由 BT.601 加權項推導，Lab 使用 D65 |
 | table | `Table_Create()`、`Table_Rebuild()`、`Table_AppendRow()`、`Table_Select()`、`Table_Clear()` | 封裝頁籤控制項與 ListView report 模式；依目前頁籤篩選 ROI，欄位定義見 §7 |
 | export | `Export_Log(img, rois)`、`Export_GetPath()` | 將各來源 ROI 分別依 §8 格式追加至來源影像旁、以來源命名的記錄檔 |
 
@@ -238,7 +257,8 @@ y_j = \left\lfloor \frac{j \cdot H}{N} \right\rfloor,\quad i,j=0..N
 | `Ctrl` + 滾輪 | 以滑鼠位置為錨點放大／縮小 |
 | `+`／`-` | 以畫布中心為錨點放大／縮小 |
 | 右鍵按住拖曳 | 平移影像 |
-| 方向鍵 | 平移影像 20 畫布像素；`Shift` + 方向鍵平移 100 像素 |
+| `←`／`→` | 上一張／下一張影像；長按瀏覽時延後 ROI 與直方圖分析 |
+| `Ctrl` + 方向鍵 | 平移影像 20 畫布像素；`Ctrl+Shift` + 方向鍵平移 100 像素 |
 | `0` | 重設為置中 fit（zoom=1.0、pan=0） |
 | `Delete` | 刪除選取的手動 ROI（僅限 DRAG 模式） |
 | `Esc` | 拖曳中：取消橡皮筋並恢復直方圖；非拖曳：清除選取（直方圖回整張） |
@@ -250,15 +270,16 @@ y_j = \left\lfloor \frac{j \cdot H}{N} \right\rfloor,\quad i,j=0..N
 | `Ctrl+E` | 匯出目前全部 ROI |
 | `O` | 開啟影像檔案對話框 |
 
-註：舊按鍵（`1/2/3/M/C/O/Del/Esc/0/方向鍵`）走 canvas `WM_KEYDOWN`，焦點在表格／下拉選單時不生效；新按鍵（`H/A/Y/R/G/B/L`）走 Accelerator Table，全域生效。`Ctrl+E` 為選單加速鍵。
+註：畫布操作快捷鍵由主訊息迴圈依焦點與控制項類別過濾；方向鍵瀏覽在表格、下拉選單、頁籤及編輯欄位中不攔截。`Ctrl+E` 為選單加速鍵。
 
 ## 6. 分析公式
 
 - 亮度使用 BT.601：\(Y = 0.299R + 0.587G + 0.114B\)。
-- 標準差為母體標準差：\(\sqrt{E[x^2] - \mu^2}\)，以 `double` 累加；若浮點誤差使根號內的值小於零，先限制為零。
+- RGB、平方及 RGB 交叉乘積以 `uint32_t` 逐列累加，再合併到 `uint64_t`；每列寬度不超過 66051，超過時改用逐像素 `double` 累加。
+- 標準差為母體標準差：\(\sqrt{E[x^2] - \mu^2}\)；若浮點誤差使根號內的值小於零，先限制為零。Y 的平均值與平方平均值由 RGB 平均、平方及交叉乘積依 BT.601 權重推導。
 - Lab 由 ROI 的平均 RGB 轉換：sRGB 線性化 → D65 XYZ → Lab；轉換公式沿用 `c-vlcplayer` 的 `analysis.c` 中 `rgb_to_lab`。
-- RGB、Y 的平均值與標準差均以 ROI 內個別像素計算；Lab 是平均 RGB 轉換結果，不是逐像素 Lab 的平均。
-- 5×5 分區在 4000×3000 影像上約處理 1,200 萬像素，採單次走訪並在 UI 執行緒同步計算；預期耗時低於約 100 毫秒。
+- RGB、Y 的統計等價於 ROI 內個別像素計算；Lab 是平均 RGB 轉換結果，不是逐像素 Lab 的平均。
+- GRID3 與 GRID5 同時存在時，分析只走訪各 ROI 矩形，合計約等於兩次全圖掃描。沿用 4000×3000 影像低於約 100 毫秒的原估計，實際耗時以 Release 實測為準。
 
 ## 7. Grid 表格（ListView）
 
@@ -313,7 +334,7 @@ Lab L=53.24 a=80.11 b=67.22
 │                                                      │
 │                    Canvas 子視窗                    │
 │   影像 fit 置中 + ROI 框 + 編號 + 格線 + 縮放提示    │
-│ Ctrl+滾輪／+/- 縮放；右鍵拖曳或方向鍵平移；0 回 fit │
+│ Ctrl+滾輪／+/- 縮放；右鍵拖曳或 Ctrl+方向鍵平移；0 回 fit │
 │                                                      │
 ├──────────────────────────────────────────────────────┤
 │ [Export]  [Clear]  ☐ 複選                            │ 按鈕列
@@ -323,7 +344,7 @@ Lab L=53.24 a=80.11 b=67.22
 │ # │ Rect │ Count │ R mean │ R std │ ... │ L │ a │ b  │ Grid 表格
 │ 1 │ ...                                              │
 ├──────────────────────────────────────────────────────┤
-│ (x,y)=(123,45) RGB=(...) | ROI: 9 | Zoom: 100% | Pan │ 狀態列
+│ 游標/RGB │ 訊息（自動填滿） │ ROI/模式/zoom │ i/n │ load|ana|hist|paint|show|done │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -337,21 +358,22 @@ Lab L=53.24 a=80.11 b=67.22
 
 `Layout()` 於 `WM_SIZE` 呼叫，依序配置子視窗：
 
-1. 傳送 `WM_SIZE` 給狀態列，使其貼齊底部，再取得狀態列高度。
+1. 傳送 `WM_SIZE` 給狀態列，使其貼齊底部；`App_StatusLayout()` 配置游標 220、訊息自動填滿、模式 200、索引 90、耗時約 260 像素五欄，窄視窗優先壓縮訊息欄。
 2. 表格目標高度為 `max(140, client_h × 0.3)`；若無法保留至少 100 像素畫布高度，則壓縮表格至可用高度。
 3. 按鈕列固定 28 像素，置於表格上方。
 4. 畫布佔用上方剩餘區域；移動或縮放畫布後，由畫布的 `WM_SIZE` 呼叫 `View_Update()` 與 `InvalidateRect()`。
 
 畫布支援 `Ctrl+滑鼠滾輪` 與 `+`／`-` 縮放，範圍為 fit 基準的 10% 至 800%，初始為 fit。縮放時以滑鼠在畫布上的位置為錨點；鍵盤縮放或沒有有效滑鼠位置時以畫布中心為錨點。更新 `view_t.zoom` 後重算偏移與繪製尺寸，錨點所對應的影像座標保持不動。
 
-平移操作為右鍵按住拖曳（影像跟隨滑鼠位移）及方向鍵；方向鍵每次平移 20 畫布像素，按住 `Shift` 時為 100 像素。`0` 將 zoom 重設為 1.0、pan 歸零並將影像置中。`view_t.pan_x/pan_y` 保存使用者平移偏移；每次更新先算置中位置再套用 pan。當影像該軸尺寸不大於畫布時忽略該軸 pan 並保持置中；尺寸較大時將偏移 clamp 至 `[畫布尺寸 - 影像繪製尺寸, 0]`，因此影像至少覆蓋該軸畫布，不會完全拖出視野或露出黑邊。左鍵仍僅建立或選取 ROI，與右鍵平移互不干擾。
+平移操作為右鍵按住拖曳（影像跟隨滑鼠位移）及 `Ctrl`+方向鍵；每次平移 20 畫布像素，另按 `Shift` 時為 100 像素。單獨 `←`／`→` 用於切換同資料夾影像。`0` 將 zoom 重設為 1.0、pan 歸零並將影像置中。`view_t.pan_x/pan_y` 保存使用者平移偏移；每次更新先算置中位置再套用 pan。當影像該軸尺寸不大於畫布時忽略該軸 pan 並保持置中；尺寸較大時將偏移 clamp 至 `[畫布尺寸 - 影像繪製尺寸, 0]`，因此影像至少覆蓋該軸畫布，不會完全拖出視野或露出黑邊。左鍵仍僅建立或選取 ROI，與右鍵平移互不干擾。
 
 畫布的 `WM_PAINT` 使用原點為畫布 `(0,0)` 的記憶體 DC 雙緩衝繪圖：
 
 | 元素 | 樣式 |
 |------|------|
 | 背景 | 深灰 `RGB(32,32,32)` |
-| 影像 | `StretchDIBits`，使用 `HALFTONE` 模式 |
+| 影像縮小 | 首次 paint 後建立最多六層 2×2 平均金字塔；選用仍不小於顯示尺寸的最小層，以 `HALFTONE` 繪製 |
+| 影像放大 | 只提交畫布可見的原圖子矩形至 `StretchDIBits`，使用 `COLORONCOLOR` 最近鄰 |
 | 一般 ROI 框 | 黃色，2 像素 |
 | 選取中的 ROI 框 | 洋紅色，3 像素 |
 | 拖曳橡皮筋 | 白色虛線，1 像素；起終點以影像座標保存後依目前 view 繪製 |
@@ -367,7 +389,7 @@ L = \text{off}_x + x_0 \cdot s,\quad R = \text{off}_x + (x_1 + 1) \cdot s
 
 \(T\)、\(B\) 方向亦同。調整大小時，畫布呼叫 `View_Update()` 重算 fit 與偏移並立即重繪，保留 `zoom` 設定；所有 ROI 座標維持在影像座標，不需額外偏移修正。
 
-標題列顯示檔名、影像尺寸、模式及單選／複選狀態。狀態列顯示游標影像座標、所選 ROI 摘要、ROI 數量、目前模式、zoom 百分比與 pan 偏移。系統不使用計時器或背景執行緒；影像為靜態內容，分析在 UI 執行緒同步執行。
+標題列顯示檔名、影像尺寸、`[i/n]`（索引非精確時顯示 `—/n`）、模式及單選／複選狀態。狀態列五欄顯示游標與原圖 RGB、操作訊息、ROI 數／模式／zoom、置中的影像索引，以及 load／analysis／histogram／paint／show／done 毫秒。長按方向鍵時只更新影像與索引，訊息欄顯示「瀏覽中…」；離開長按後再補做分析。雲端佔位檔載入前會先更新狀態列並呼叫 `UpdateWindow()` 顯示下載提示。導航先替換影像並同步畫出首幀，再分析 ROI、更新表格及直方圖；金字塔只供顯示使用，分析、直方圖及游標取色始終讀取原始 BGRA。WIC 優先解碼，失敗才使用 GDI+；WinMain 以 STA 初始化 COM。金字塔建置與分析均在 UI 執行緒執行，不使用背景執行緒。
 
 ## 10. 建置
 
@@ -381,7 +403,9 @@ add_executable(roi_analyzer
     src/app.rc
     src/main.c
     src/canvas.c
+    src/filelist.c
     src/image.c
+    src/image_wic.c
     src/view.c
     src/roi.c
     src/analyze.c
@@ -394,7 +418,7 @@ add_executable(roi_analyzer
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)
 target_compile_definitions(roi_analyzer PRIVATE NOMINMAX)
-target_link_libraries(roi_analyzer user32 gdi32 kernel32 comctl32 comdlg32 gdiplus shell32 m)
+target_link_libraries(roi_analyzer user32 gdi32 kernel32 comctl32 comdlg32 gdiplus shell32 shlwapi windowscodecs ole32 uuid m)
 
 set_target_properties(roi_analyzer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin
@@ -406,7 +430,7 @@ set_target_properties(roi_analyzer PROPERTIES
 cd C:/Github/roi-analyzer
 export PATH="/c/msys64/ucrt64/bin:$PATH"   # cc1.exe 執行時需可載入 libmpfr-6.dll
 rm -rf build
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_MAKE_PROGRAM="C:/msys64/ucrt64/bin/mingw32-make.exe"
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM="C:/msys64/ucrt64/bin/mingw32-make.exe"
 cmake --build build
 ```
 

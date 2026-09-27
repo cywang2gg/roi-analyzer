@@ -20,10 +20,14 @@ int Image_Load(image_t *img, const char *path)
     size_t rowbytes;
     int y;
 
-    if (!img || !path || !path[0])
+    if (!img)
+        return -1;
+    ZeroMemory(img, sizeof(*img));
+    if (!path || !path[0])
         return -1;
 
-    Image_Free(img);
+    if (Image_LoadWIC(img, path) == 0)
+        return 0;
 
     gi.GdiplusVersion = 1;
     gi.DebugEventCallback = NULL;
@@ -94,6 +98,7 @@ int Image_Load(image_t *img, const char *path)
     img->pitch = (int)rowbytes;
     strncpy(img->path, path, MAX_PATH - 1);
     img->path[MAX_PATH - 1] = '\0';
+    strcpy(img->decoder, "GDI+");
     img->valid = TRUE;
     return 0;
 }
@@ -102,9 +107,11 @@ void Image_Free(image_t *img)
 {
     if (!img)
         return;
-    free(img->px);
+    if (img->px)
+        free(img->px);
     img->px = NULL;
     img->w = img->h = img->pitch = 0;
     img->path[0] = '\0';
+    img->decoder[0] = '\0';
     img->valid = FALSE;
 }

@@ -5,5 +5,7 @@
 
 BOOL Canvas_Register(HINSTANCE instance);
 LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+void Canvas_NavigationStarted(void);
+void Canvas_BuildPyramidNow(void);
 
 #endif

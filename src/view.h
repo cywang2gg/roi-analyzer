@@ -15,6 +15,24 @@ typedef struct view_s {
     float zoom;         // multiplier of fit scale; 1.0 means fit
 } view_t;
 
+#define VIEW_MAX_LEVELS 6
+
+typedef struct {
+    unsigned char *px;
+    int w, h, pitch;
+    BOOL owned;
+} view_level_t;
+
+typedef struct {
+    view_level_t levels[VIEW_MAX_LEVELS];
+    int count;
+} view_pyr_t;
+
+BOOL ViewPyr_Build(view_pyr_t *pyramid, const image_t *img);
+void ViewPyr_Free(view_pyr_t *pyramid);
+const view_level_t *ViewPyr_Pick(const view_pyr_t *pyramid,
+                                 int draw_w, int draw_h, BOOL nearest);
+
 // Recompute from client and image sizes at the requested relative zoom.
 void View_Update(view_t *v, int cw, int ch, int iw, int ih, float zoom);
 
@@ -39,5 +57,7 @@ void View_RectToWindow(const view_t *v, RECT image_rect, RECT *window_rect);
 
 // Paint image scaled into view rect (no-op when invalid).
 void View_DrawImage(HDC hdc, const view_t *v, const image_t *img);
+void View_DrawImagePyramid(HDC hdc, const view_t *v, const image_t *img,
+                           const view_pyr_t *pyramid);
 
 #endif

@@ -179,9 +179,10 @@ roi_source_t ROI_ModeSource(roi_mode_t mode)
     }
 }
 
-BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n)
+static BOOL build_grid(roi_list_t *list, const image_t *img, int n,
+                       BOOL analysis_pending)
 {
-    int row, col;
+    int row, col, capacity;
     roi_source_t source;
 
     if (!list || !img || !img->valid || (n != 3 && n != 5))
@@ -199,14 +200,54 @@ BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n)
             rc.right = (int)(((long long)(col + 1) * img->w) / n) - 1;
             rc.top = y0;
             rc.bottom = y1;
-            if (!ROI_Add(list, img, rc, source)) {
-                ROI_ClearSource(list, source);
-                return FALSE;
+            if (analysis_pending) {
+                roi_item_t *items;
+                if (list->count == list->cap) {
+                    if (list->cap > INT_MAX / 2)
+                        goto fail;
+                    capacity = list->cap ? list->cap * 2 : 8;
+                    items = (roi_item_t *)realloc(
+                        list->items, (size_t)capacity * sizeof(*items));
+                    if (!items)
+                        goto fail;
+                    list->items = items;
+                    list->cap = capacity;
+                }
+                ZeroMemory(&list->items[list->count].res,
+                           sizeof(list->items[list->count].res));
+                list->items[list->count].rc = rc;
+                list->items[list->count].source = source;
+                list->count++;
+            } else if (!ROI_Add(list, img, rc, source)) {
+                goto fail;
             }
         }
     }
     ROI_SetSelected(list, -1);
     return TRUE;
+
+fail:
+    ROI_ClearSource(list, source);
+    return FALSE;
+}
+
+BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n)
+{
+    return build_grid(list, img, n, FALSE);
+}
+
+BOOL ROI_BuildGridPending(roi_list_t *list, const image_t *img, int n)
+{
+    return build_grid(list, img, n, TRUE);
+}
+
+void ROI_ReanalyzeAll(roi_list_t *list, const image_t *img)
+{
+    int i;
+    if (!list || !img || !img->valid)
+        return;
+    for (i = 0; i < list->count; i++)
+        AnalyzeROI(img, list->items[i].rc, &list->items[i].res);
 }
 
 int ROI_HitTest(const roi_list_t *list, POINT p)

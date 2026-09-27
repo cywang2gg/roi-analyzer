@@ -42,6 +42,8 @@ void ROI_Destroy(roi_list_t *list);
 BOOL ROI_Add(roi_list_t *list, const image_t *img, RECT rc, roi_source_t source);
 BOOL ROI_Remove(roi_list_t *list, int index);
 BOOL ROI_BuildGrid(roi_list_t *list, const image_t *img, int n);
+BOOL ROI_BuildGridPending(roi_list_t *list, const image_t *img, int n);
+void ROI_ReanalyzeAll(roi_list_t *list, const image_t *img);
 int ROI_SourceCount(const roi_list_t *list, roi_source_t source);
 int ROI_SourceIndex(const roi_list_t *list, int global_index);
 roi_source_t ROI_ModeSource(roi_mode_t mode);

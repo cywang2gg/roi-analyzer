@@ -27,6 +27,7 @@ BOOL HistPanel_Register(HINSTANCE hinst);
 HWND HistPanel_Create(HWND parent, int ctrl_id);
 void HistPanel_SetSource(HWND hp, const image_t *img, const RECT *rc,
                          const wchar_t *label, unsigned int img_gen);
+void HistPanel_SetLabel(HWND hp, const wchar_t *label);
 void HistPanel_ClearSource(HWND hp);
 void HistPanel_SetChannel(HWND hp, hist_channel_t ch);
 hist_channel_t HistPanel_GetChannel(HWND hp);
