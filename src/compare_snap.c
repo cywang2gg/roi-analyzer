@@ -3,6 +3,7 @@
 #include "compare.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,68 @@
 #include <objbase.h>
 #include <shlwapi.h>
 #include <wincodec.h>
+
+typedef HANDLE (WINAPI *snap_set_thread_dpi_context_fn)(HANDLE);
+
+int Snap_Round(double value)
+{
+    if (!isfinite(value) || value > INT_MAX || value < INT_MIN)
+        return 0;
+    return (int)(value >= 0.0 ? floor(value + 0.5) : ceil(value - 0.5));
+}
+
+double Snap_PhysicalScale(HWND hwnd)
+{
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    snap_set_thread_dpi_context_fn set_context;
+    FARPROC procedure;
+    RECT logical_rect, physical_rect;
+    HANDLE previous;
+    double scale = 1.0;
+
+    if (!hwnd || !user32 ||
+        !GetWindowRect(hwnd, &logical_rect) ||
+        logical_rect.right <= logical_rect.left)
+        return scale;
+    procedure = GetProcAddress(user32, "SetThreadDpiAwarenessContext");
+    if (!procedure || sizeof(set_context) != sizeof(procedure))
+        return scale;
+    memcpy(&set_context, &procedure, sizeof(set_context));
+    previous = set_context((HANDLE)(LONG_PTR)-4);
+    if (!previous)
+        return scale;
+    if (GetWindowRect(hwnd, &physical_rect) &&
+        physical_rect.right > physical_rect.left) {
+        double candidate = (double)(physical_rect.right - physical_rect.left) /
+                           (double)(logical_rect.right - logical_rect.left);
+        if (isfinite(candidate) && candidate > 0.0)
+            scale = candidate;
+    }
+    set_context(previous);
+    return scale;
+}
+
+HFONT CmpSnap_CreateScaledFont(double scale)
+{
+    LOGFONTA source;
+    int dpi;
+    if (!isfinite(scale) || scale <= 0.0)
+        return NULL;
+    if (GetObjectA(Cmp_UiFont(), (int)sizeof(source), &source) !=
+        (int)sizeof(source))
+        return NULL;
+    dpi = Snap_Round(scale * 96.0);
+    if (dpi <= 0)
+        return NULL;
+    return CreateFontA(MulDiv(source.lfHeight, dpi, 96),
+                       source.lfWidth, source.lfEscapement,
+                       source.lfOrientation, source.lfWeight,
+                       source.lfItalic, source.lfUnderline,
+                       source.lfStrikeOut, source.lfCharSet,
+                       source.lfOutPrecision, source.lfClipPrecision,
+                       source.lfQuality, source.lfPitchAndFamily,
+                       source.lfFaceName);
+}
 
 void CmpInfo_Add(char lines[CMP_MAX_CELLS + 1][256], int *count,
                  const char *text)

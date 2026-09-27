@@ -262,7 +262,7 @@ static void v1_render(cmp_v1_t *state, HDC dc, int width, int height,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                       DT_END_ELLIPSIS | DT_NOPREFIX);
         }
-        if (view_w > 0 && view_h > 0) {
+        if (!(flags & CMP_RENDER_SNAPSHOT) && view_w > 0 && view_h > 0) {
             HBRUSH close_brush = CreateSolidBrush(RGB(150, 35, 35));
             FillRect(dc, &cell->close_rect, close_brush);
             DeleteObject(close_brush);
@@ -297,6 +297,92 @@ static void v1_render(cmp_v1_t *state, HDC dc, int width, int height,
     }
 }
 
+static RECT v1_scale_rect(const RECT *rect, double scale)
+{
+    RECT scaled;
+    scaled.left = Snap_Round(rect->left * scale);
+    scaled.top = Snap_Round(rect->top * scale);
+    scaled.right = Snap_Round(rect->right * scale);
+    scaled.bottom = Snap_Round(rect->bottom * scale);
+    return scaled;
+}
+
+static void v1_render_snapshot(cmp_v1_t *state, HDC dc, int width, int height,
+                               double scale, HFONT font)
+{
+    RECT client = { 0, 0, Snap_Round(width * scale),
+                    Snap_Round(height * scale) };
+    HBRUSH background = CreateSolidBrush(RGB(45, 45, 45));
+    HGDIOBJ old_font;
+    int i;
+
+    FillRect(dc, &client, background);
+    DeleteObject(background);
+    old_font = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(245, 245, 245));
+    for (i = 0; i < state->count; i++) {
+        cmp_cell_t *cell = &state->cells[i];
+        cmp_cell_t scaled_cell = *cell;
+        cmp_view_t view = cell->view;
+        RECT image_rect, status_rect;
+        RECT text_rect;
+        char label[MAX_PATH + 100];
+        scaled_cell.image_rect = v1_scale_rect(&cell->image_rect, scale);
+        scaled_cell.status_rect = v1_scale_rect(&cell->status_rect, scale);
+        scaled_cell.close_rect = v1_scale_rect(&cell->close_rect, scale);
+        image_rect = scaled_cell.image_rect;
+        status_rect = scaled_cell.status_rect;
+        view.zoom *= scale;
+        Cmp_Blit(dc, cell->image, &view, &image_rect, &image_rect);
+        FillRect(dc, &status_rect, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        _snprintf(label, sizeof(label), "%d: %s | %.0f%% | %dx%d | %dx%d",
+                  i + 1, cell->image->name, cell->view.zoom * 100.0,
+                  (int)(cell->image->img.w * cell->view.zoom),
+                  (int)(cell->image->img.h * cell->view.zoom),
+                  cell->image->img.w, cell->image->img.h);
+        label[sizeof(label) - 1] = '\0';
+        text_rect = status_rect;
+        text_rect.left += Snap_Round(5.0 * scale);
+        text_rect.right -= Snap_Round(25.0 * scale);
+        DrawTextA(dc, label, -1, &text_rect,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+                  DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    if (state->count > 1) {
+        int pen_width = Snap_Round(scale);
+        HPEN pen;
+        HGDIOBJ old_pen;
+        if (pen_width < 1)
+            pen_width = 1;
+        pen = CreatePen(PS_SOLID, pen_width, RGB(130, 130, 130));
+        old_pen = SelectObject(dc, pen);
+        if (state->count == 2) {
+            int x = Snap_Round(width * 0.5 * scale);
+            MoveToEx(dc, x, 0, NULL);
+            LineTo(dc, x, client.bottom);
+        } else if (state->count == 3) {
+            int y1 = Snap_Round(height / 3.0 * scale);
+            int y2 = Snap_Round(height * 2.0 / 3.0 * scale);
+            MoveToEx(dc, 0, y1, NULL);
+            LineTo(dc, client.right, y1);
+            MoveToEx(dc, 0, y2, NULL);
+            LineTo(dc, client.right, y2);
+        } else {
+            int x = Snap_Round(width * 0.5 * scale);
+            int y = Snap_Round(height * 0.5 * scale);
+            MoveToEx(dc, x, 0, NULL);
+            LineTo(dc, x, client.bottom);
+            MoveToEx(dc, 0, y, NULL);
+            LineTo(dc, client.right, y);
+        }
+        SelectObject(dc, old_pen);
+        DeleteObject(pen);
+    }
+    if (old_font)
+        SelectObject(dc, old_font);
+}
+
 static void v1_paint(cmp_v1_t *state, HWND hwnd)
 {
     PAINTSTRUCT paint;
@@ -326,10 +412,23 @@ static void v1_snapshot(cmp_v1_t *state, BOOL copy_only)
     cmp_snap_t snapshot;
     char lines[CMP_MAX_CELLS + 1][256] = { { 0 } };
     char text[256], path[MAX_PATH] = { 0 };
-    int line_count = 0, height, i;
+    double scale;
+    HFONT font;
+    int line_count = 0, height, output_width, output_height, i;
     BOOL copied;
     if (!state || !state->grid || !GetClientRect(state->grid, &client))
         return;
+    scale = Snap_PhysicalScale(state->grid);
+    output_width = Snap_Round(client.right * scale);
+    output_height = Snap_Round(client.bottom * scale);
+    font = CmpSnap_CreateScaledFont(scale);
+    if (output_width <= 0 || output_height <= 0 || !font) {
+        MessageBoxA(state->hwnd, "Could not prepare the snapshot rendering.",
+                    "Snapshot", MB_OK | MB_ICONERROR);
+        if (font)
+            DeleteObject(font);
+        return;
+    }
     GetLocalTime(&now);
     if (state->show_info) {
         _snprintf(text, sizeof(text),
@@ -341,28 +440,38 @@ static void v1_snapshot(cmp_v1_t *state, BOOL copy_only)
         CmpInfo_Add(lines, &line_count, text);
         for (i = 0; i < state->count; i++) {
             cmp_cell_t *cell = &state->cells[i];
+            RECT visible;
+            int view_w = cell->image_rect.right - cell->image_rect.left;
+            int view_h = cell->image_rect.bottom - cell->image_rect.top;
+            int visible_w = 0, visible_h = 0;
+            if (CmpView_VisibleRect(&cell->view, view_w, view_h,
+                                    cell->image->img.w, cell->image->img.h,
+                                    &visible)) {
+                visible_w = visible.right - visible.left;
+                visible_h = visible.bottom - visible.top;
+            }
             _snprintf(text, sizeof(text),
-                      "%d: %s | %.0f%% | %dx%d | %dx%d", i + 1,
+                      "%d: %s | %.0f%% | src %dx%d | %dx%d", i + 1,
                       cell->image->name, cell->view.zoom * 100.0,
-                      (int)(cell->image->img.w * cell->view.zoom),
-                      (int)(cell->image->img.h * cell->view.zoom),
+                      visible_w, visible_h,
                       cell->image->img.w, cell->image->img.h);
             CmpInfo_Add(lines, &line_count, text);
         }
     }
-    height = client.bottom + CmpInfo_Height(Cmp_UiFont(), line_count);
+    height = output_height + CmpInfo_Height(font, line_count);
     if (height <= 0 ||
-        !CmpSnap_Begin(state->hwnd, client.right, height, &snapshot)) {
+        !CmpSnap_Begin(state->hwnd, output_width, height, &snapshot)) {
         MessageBoxA(state->hwnd, "Could not allocate the snapshot image.",
                     "Snapshot", MB_OK | MB_ICONERROR);
+        DeleteObject(font);
         return;
     }
-    v1_layout(state);
-    v1_render(state, snapshot.dc, client.right, client.bottom,
-              CMP_RENDER_SNAPSHOT);
+    v1_render_snapshot(state, snapshot.dc, client.right, client.bottom,
+                       scale, font);
     if (line_count)
-        CmpInfo_Draw(snapshot.dc, client.right, client.bottom, Cmp_UiFont(),
+        CmpInfo_Draw(snapshot.dc, output_width, output_height, font,
                      lines, line_count);
+    DeleteObject(font);
     CmpSnap_Finalize(&snapshot);
     if (copy_only)
         copied = CmpSnap_CopyToClipboard(state->hwnd, snapshot.bitmap);

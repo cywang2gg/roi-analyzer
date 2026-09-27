@@ -4,7 +4,7 @@
 
 ## 變更歷史
 
-- **v2.7 增補（2026-09-27）**：主視窗多檔拖放（`CmpDrop_Collect` 共用收集：W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP；不按 `Ctrl` 且 ≥2 張時主視窗載入第一張＋V1 開全部，按 `Ctrl` 時含目前影像且主視窗不變）。比較視窗 Snapshot（`compare_snap.c` 約 490 行：`CmpSnap_Begin/Finalize/End`＋WIC PNG 編碼＋`CF_BITMAP` 剪貼簿；按鈕與 `Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存、`Ctrl+C` 只複製；存檔位置為影像所在資料夾，檔名 `snap_<A>_vs_<B>_時間戳`，失敗時開另存對話框）。V1／V2 工具列加 `Info bar` 核取方塊。C11：比較模組與 `export` 的路徑拆解改用 shlwapi（DBCS 安全）。詳見 `compareformV1V2_architecture_.md` §14。
+- **v2.7 增補（2026-09-27）**：主視窗多檔拖放（`CmpDrop_Collect` 共用收集：W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP；不按 `Ctrl` 且 ≥2 張時主視窗載入第一張＋V1 開全部，按 `Ctrl` 時含目前影像且主視窗不變）。比較視窗 Snapshot（`compare_snap.c` 約 550 行：`CmpSnap_Begin/Finalize/End`＋WIC PNG 編碼＋`CF_BITMAP` 剪貼簿；按鈕與 `Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存、`Ctrl+C` 只複製；存檔位置為影像所在資料夾，檔名 `snap_<A>_vs_<B>_時間戳`，失敗時開另存對話框）。Snapshot 輸出尺寸改以**螢幕實際佔用像素**（`Snap_PhysicalScale` 動態切換執行緒 DPI 感知量測，維持 manifest DPI-unaware；`(u,v)` 不變、以 `z×scale` 渲染，可見範圍與螢幕相同但無系統點陣放大模糊）。V1／V2 工具列加 `Info bar` 核取方塊。C11：比較模組與 `export` 的路徑拆解改用 shlwapi（DBCS 安全）。詳見 `compareformV1V2_architecture_.md` §14。
 - **v2.7（2026-09-27）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像以參考計數 `cmp_image_t` 共享，目前影像以 `Image_Clone` 記憶體複製交付。詳見 `compareformV1V2_architecture_.md`（定稿 C1～C10）。直方圖命令 ID 移至 161～166；`View` 選單新增 `Compare Files… (Ctrl+K)`／`Compare Current with Next (K)`。
 - **v2.6（2026-09-27）**：狀態列改為游標／訊息／ROI 模式／影像索引／耗時五欄；支援雲端佔位檔提示、WIC 優先解碼與 GDI+ fallback、延遲建立顯示金字塔、先顯示影像再分析，以及以整數逐列累加 RGB／Y 統計。放大使用可見原圖區域與最近鄰顯示；分析、直方圖及游標取色仍使用原圖。
 - **v2.5（2026-09-27）**：加入同資料夾上一張／下一張、自然排序與目錄 mtime 快取；同解析度沿用 ROI、不同解析度重建既有格線；長按方向鍵延後 ROI／直方圖重算。GRID3 與 GRID5 同時存在時，ROI 分析約需兩次全圖掃描；耗時估計以 Release 實測為準。
@@ -471,4 +471,4 @@ cmake --build build
 1. **3×3／5×5 的語意**：本版定義為整張影像分成 9／25 個 ROI。若仍需以點擊位置為中心取 3×3／5×5 像素，須另增模式。
 2. **單選／複選的語意**：本版以複選核取方塊控制新增時是否累加，並支援 Ctrl 暫時累加。表格仍維持單列選取；若需求是同時選取多列，需改用 ListView 多重選取並另定義刪除與匯出的選取範圍。
 3. **匯出方式與格式**：本版固定依 ROI 來源輸出至影像旁的 append 記錄檔。若需「另存新檔」對話框或 CSV 格式以供試算表使用，須新增 Export As 功能。
-4. **比較視窗已知限制**：未宣告 DPI 感知，150% 等非 100% 系統縮放下比較視窗與主畫布一樣經系統點陣放大，100% 不是真正的像素對像素；B1 背景預載尚未實作，連開多張大圖時開啟 V1 需等待解碼完成。
+4. **比較視窗已知限制**：未宣告 DPI 感知，150% 等非 100% 系統縮放下比較視窗與主畫布一樣經系統點陣放大，100% 不是真正的像素對像素；Snapshot 已改以螢幕實際佔用像素輸出（`Snap_PhysicalScale` 暫時切換執行緒 DPI 感知後量測），但長期仍建議在 manifest 宣告 Per-Monitor V2 並處理 `WM_DPICHANGED`。B1 背景預載尚未實作，連開多張大圖時開啟 V1 需等待解碼完成。

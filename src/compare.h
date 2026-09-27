@@ -104,6 +104,9 @@ void CmpInfo_Draw(HDC dc, int width, int top, HFONT font,
 BOOL CmpSnap_Begin(HWND owner, int width, int height, cmp_snap_t *snapshot);
 void CmpSnap_Finalize(cmp_snap_t *snapshot);
 void CmpSnap_End(cmp_snap_t *snapshot);
+double Snap_PhysicalScale(HWND hwnd);
+int Snap_Round(double value);
+HFONT CmpSnap_CreateScaledFont(double scale);
 BOOL CmpSnap_MakePath(const SYSTEMTIME *time, const char *ref_path,
                       const char *name_a, const char *name_b,
                       char *path, size_t capacity);

@@ -5,12 +5,12 @@
 # CompareForm 移植架構書（roi_analyzer v2.7 增補，2026-09-27）
 
 > 將 C# `CompareForm`（V1 並排）與 `CompareFormV2`（V2 分割線疊加）移植到 roi_analyzer。維持純 C＋Win32＋GDI、ANSI 建置、無第三方依賴。
-> 實作約 3200 行（compare.h 123／compare_image.c 155／compare_core.c 437／compare_snap.c 492／compare_v1.c 1009／compare_v2.c 1017，另 main.c 增補約 340、export.c +19）。與主程式共用 `Image_Load`（WIC→GDI+）與 `view_pyr` 金字塔，其餘自成模組。
-> v2.7 定稿修正 C1～C10（見 §13 定稿附錄）取代草案對應段落；v2.7 增補（§14 主視窗多檔拖放＋Snapshot、拍板 S1～S7、T1～T3、C11）。`Report` 延後（P6 保留設計）。
+> 實作約 3460 行（compare.h 126／compare_image.c 155／compare_core.c 437／compare_snap.c 555／compare_v1.c 1118／compare_v2.c 1078，另 main.c 增補約 340、export.c +19）。與主程式共用 `Image_Load`（WIC→GDI+）與 `view_pyr` 金字塔，其餘自成模組。
+> v2.7 定稿修正 C1～C10（見 §13 定稿附錄）取代草案對應段落；v2.7 增補（§14 主視窗多檔拖放＋Snapshot（含螢幕實際像素輸出）、拍板 S1～S7、T1～T3、C11）。`Report` 延後（P6 保留設計）。
 
 ## 變更歷史
 
-- **v2.7 增補（2026-09-27）**：主視窗多檔拖放（§14.1；`CmpDrop_Collect`、`cmp_open_mode_t`、S1＋S2＋S3、T2 附註、T3 目前）與 Snapshot（§14.2；`compare_snap.c`、S4～S7、T1 `Info bar`）。C11 路徑拆解 DBCS 安全（`export.c` 一併修正）。增補行數以實作檔案為準（見上）。
+- **v2.7 增補（2026-09-27）**：主視窗多檔拖放（§14.1；`CmpDrop_Collect`、`cmp_open_mode_t`、S1＋S2＋S3、T2 附註、T3 目前）與 Snapshot（§14.2；`compare_snap.c`、S4～S7、T1 `Info bar`、§14.4 螢幕實際像素輸出）。C11 路徑拆解 DBCS 安全（`export.c` 一併修正）。增補行數以實作檔案為準（見上）。
 
 - **v2.7 定稿（2026-09-27）**：P0～P4 實作完成。`Image_Clone`；V1（2～4 張並排，Lock 同步）；V2（疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像上限 `CMP_MAX_LIVE_IMG=8` 預先檢查；拖放用 `DragQueryFileW`＋嚴格 ACP；主迴圈加速鍵包覆 `root==main`（C6）；IDM 155／156；直方圖 ID 移至 161～166。V2 控制列改為比例式（Zoom 佔半、Pan／Actions 平分剩餘）。
 - **v2.7（本草案）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加，可拖曳分割線、`Swap`、各自倍率）。影像以參考計數共享。統一「視口中心影像座標」模型。修正 C# 版縮放量化卡死、fit 溢出、分割線不隨縮放等問題。`Report` 延後。
@@ -1288,9 +1288,24 @@ static BOOL wide_to_acp_strict(const WCHAR *w, char *out, int cap)
 - 繪製重構：V1／V2 的 `WM_PAINT` 拆為 `v1_render(s,dc,w,h,flags)`／`v2_render(…)`＋貼上畫面；Snapshot 呼叫同一渲染函式（`CMP_RENDER_SNAPSHOT` 不畫關閉鈕與 hover），僅限參數 `w×h` 範圍填底色，不可用 `GetClientRect`（否則蓋掉資訊列區）。V1 Snapshot 含格線＋每格狀態帶（加格號 `[1]`～`[4]`，與資訊列對應），V2 含分割線＋A/B 標籤（含倍率如 `A: a.jpg 35%`）；像素讀值（狀態列）不入圖。
 - `compare_snap.c`（492 行）：`CmpSnap_Begin`（`CreateCompatibleBitmap` 相容點陣）、`CmpSnap_Finalize`（僅 deselect＋DeleteDC）、`CmpSnap_End`、`snap_encode`（WIC `CreateBitmapFromHBITMAP`＋`WICBitmapIgnoreAlpha`＋PNG 編碼；實作等價於逐像素補 alpha，輸出不透明）、`CmpSnap_CopyToClipboard`（`CopyImage(LR_CREATEDIBSECTION)`＋`CF_BITMAP`，`OpenClipboard` 重試 5 次；小畫家／Word 可貼，實作等價於 `CF_DIB`）、`CmpSnap_MakePath`／`CmpSnap_SavePng`／`CmpSnap_Deliver`／`cmp_save_as_dialog`、`CmpInfo_Add/Height/Draw`、`CmpView_VisibleRect` 在 `compare_core.c`、`Cmp_UiFont`。
 - S4 目前：位置＝影像所在資料夾（`snap_ref_directory`：`PathRemoveFileSpecA`＋目錄屬性驗證；無效時 fallback 既有 Pictures 邏輯），V1 取第 0 格、V2 取畫面左側；檔名 `snap_<A>_vs_<B>_yyyymmdd-hhmmss[_k].png`（A/B 主檔名以 `CharNextA` 逐字截 32 位元組，DBCS 安全；`_k` 防覆寫，沿用既有 suffix 迴圈語意）。
-- S5 目前：畫布客戶區 1:1；S6 替代（資訊列，不寫 `tEXt`——`tEXt` 僅 Latin-1，中文 ANSI 會違規）：底部資訊列（字高＋4／行＋8 邊距），只有輸出圖有；V1 約 5 行（標題：程式名｜時間｜Lock｜張數｜畫布尺寸；每格 `[i] 倍率｜src 可見區｜原尺寸｜路徑`）、V2 約 3 行（split／swap／sync／pan target；`L = A`／`R = B` 兩行）；`src` 可見區由 `CmpView_VisibleRect`（與 `Cmp_Blit` 同算法）得出，可對應主視窗 ROI；路徑放行尾以 `DT_PATH_ELLIPSIS` 省略中段；尺寸用 ASCII `x`；時間與檔名同一 `SYSTEMTIME`。T1 替代：V1／V2 工具列 `Info bar` 核取方塊（預設勾選；關閉時 Snapshot 尺寸＝畫布尺寸）。
+- S5 目前：畫布客戶區 1:1，Snapshot 輸出改以**螢幕實際佔用像素**為尺寸（`Snap_PhysicalScale`）。程式維持 DPI-unaware（manifest 不動），於 `compare_snap.c` 以 `GetProcAddress(user32,"SetThreadDpiAwarenessContext")` 動態取得 API，暫時把本執行緒切到 Per-Monitor V2 後再取 `GetWindowRect`，與切換前比較寬度得 `scale = 物理 / 邏輯`；API 不存在（Win10 1607 前）、`GetWindowRect` 失敗或比例無效時回 1.0。Snapshot 只在該執行緒切換期間量測，主程式全 UI 版面不受影響。輸出尺寸＝`Snap_Round(client 邏輯寬高 × scale)`（V1 取 grid client、V2 取 overlay client），`z` 不變、實作改用 `z×scale` 渲染（`(u,v)` 不變 → 可見範圍與螢幕完全相同，但不會有系統點陣放大的模糊）；放大後的 zoom 不走 `CmpView_Fit`／`CmpZoom_Step`（會被 clamp 到 8.0），直接指定 `cmp_view_t.zoom`，`Cmp_Blit` 本身無 clamp。所有 rect 各邊以 `Snap_Round` 個別換算避免相鄰格 1px 縫隙；格線／黃線寬度 `max(1, Snap_Round(scale))`；狀態帶與 A/B 標籤字型用 `CmpSnap_CreateScaledFont(scale)`（`MulDiv(基準字高, dpi, 96)` 的 `CreateFontA`，用完刪除，不動 `Cmp_UiFont`）；V2 分割線依 `split_fraction × 物理寬`（比例制）。資訊列寬＝物理寬，高度以放大字型量測，但顯示的倍率與 `src` 可見區仍用**原本 z 與邏輯 rect**（`CmpView_VisibleRect`）計算，不顯示 `z×scale`。螢幕繪製路徑不受影響：`v1_render` 簽章未變、`v2_render` 螢幕呼叫傳 `scale=1.0` ＋ `Cmp_UiFont()`。S6 替代（資訊列，不寫 `tEXt`——`tEXt` 僅 Latin-1，中文 ANSI 會違規）：底部資訊列（字高＋4／行＋8 邊距），只有輸出圖有；V1 約 5 行（標題：程式名｜時間｜Lock｜張數｜畫布尺寸；每格 `[i] 倍率｜src 可見區｜原尺寸｜路徑`）、V2 約 3 行（split／swap／sync／pan target；`L = A`／`R = B` 兩行）；`src` 可見區由 `CmpView_VisibleRect`（與 `Cmp_Blit` 同算法）得出，可對應主視窗 ROI；路徑放行尾以 `DT_PATH_ELLIPSIS` 省略中段；尺寸用 ASCII `x`；時間與檔名同一 `SYSTEMTIME`。T1 替代：V1／V2 工具列 `Info bar` 核取方塊（預設勾選；關閉時 Snapshot 尺寸＝畫布尺寸，不含資訊列）。
 - S7 替代：按鈕＋`Ctrl+S` 存檔的同時複製（先複製後存檔；對話框取消剪貼簿仍有圖）；`Ctrl+Shift+S` 另存＋複製；`Ctrl+C` 只複製。成功訊息寫既有訊息欄（V1 `state->message`、V2 狀態列：`Saved <檔名> + clipboard`），不彈成功窗；存檔與複製都失敗才 MessageBox。`CMPM_KEY` 開頭取 `ctrl/shift`，單鍵 `S/M/P/L/V/0/+/-` 只在無 `Ctrl` 時生效（C6 保證不落到主視窗）。
 
 ### 14.3 C11：DBCS 路徑的反斜線判斷
 
 ANSI 建置下 Big5（CP950）／Shift-JIS 雙位元組字元的第二位元組可為 0x5C（如「許功蓋」），`strrchr(path,'\')` 會在字元中間切斷。比較模組路徑拆解一律改用 shlwapi（`PathFindFileNameA`／`PathFindExtensionA`／`PathRemoveFileSpecA`），截斷以 `CharNextA` 逐字前進；`export.c` 的 `<主檔>_…log` 命名同步修正（`strrchr`→shlwapi）。
+
+### 14.4 Snapshot 改用「螢幕實際佔用像素」輸出（2026-09-27 追加）
+
+程式維持 **DPI-unaware**（`app.manifest` 不動，主程式全 UI 版面與既有行為零風險），改用 thread-DPI trick 即時取得物理/邏輯比例：
+
+- `Snap_PhysicalScale(HWND)`（`compare_snap.c`）：動態 `GetProcAddress(GetModuleHandleA("user32.dll"), "SetThreadDpiAwarenessContext")`；先 `GetWindowRect` 取邏輯寬，再把本執行緒暫切 `Per-Monitor V2`（`(HANDLE)(LONG_PTR)-4`）取物理寬，還原後回傳 `物理寬 / 邏輯寬`。API 不存在（Win10 1607 前）、`GetWindowRect` 失敗、`oldCtx == NULL` 或比例非有限正值 → 回 1.0。切換只涵蓋量測瞬間，不影響其他視窗與主程式版面。
+- `Snap_Round(double)`：對稱四捨五入；各 rect **左右／上下邊各自 round**（不是先算寬再相加），避免相鄰格子出現 1px 縫隙或重疊。
+- 輸出尺寸：V1 取 grid client、V2 取 overlay client，`Snap_Round(client × scale)`；`CmpSnap_Begin` 以該尺寸（＋資訊列高）建 DIB。
+- 內容一致性：`(u, v)` 不變、以 `z × scale` 渲染。由 `x_screen = c_x + (x_img - u)·z·s` 可知可見影像範圍與螢幕完全相同，但因為是原生解析度重繪（不是 DWM 的點陣放大），輸出比螢幕更清晰。**放大後的 zoom 不可經過 `CmpView_Fit`／`CmpZoom_Step`**（會 clamp 到 `CMP_ZOOM_MAX 8.0`），實作直接把放大的值寫入 `cmp_view_t` 副本的 `zoom` 欄位；`Cmp_Blit` 本身無 clamp，8.0 × 1.5 = 12.0 可正常渲染。`CmpView_Fit`／`CmpZoom_Step` 的 clamp 僅保留給互動路徑。
+- V1：以 `v1_scale_rect` 換算 `image_rect`／`status_rect`／`close_rect`，`viewport` 與 `clip` 都用放大的 `image_rect`；狀態帶文字邊距 `5*scale`／`25*scale`；格線 1px（`max(1, Snap_Round(scale))`）；`CMP_RENDER_SNAPSHOT` 下不畫關閉鈕。
+- V2：`client` 即物理尺寸並作為 `viewport`；`split = floor(split_fraction × 物理寬 + 0.5)`（分割線本就以比例儲存，不需再乘 scale）；黃線寬 `max(1, Snap_Round(scale))`，螢幕路徑固定 2px；A/B 標籤帶 `{8, 8, w/2, 32}` 以 `v2_scale_rect` 換算；左右各自 `zoom × scale` 後 `Cmp_Blit`。
+- 字型：`CmpSnap_CreateScaledFont(scale)` 以 `MulDiv(基準 lfHeight, dpi, 96)`（`dpi = Snap_Round(scale × 96)`）建立 `CreateFontA`，供狀態帶、A/B 標籤與資訊列使用，用完 `DeleteObject`；`Cmp_UiFont()` 不被修改。
+- 資訊列：寬 = 物理寬，高度用放大字型量測（`CmpInfo_Height`）。**顯示的倍率與 `src` 可見區仍用原本的 `z` 與邏輯 rect**（`CmpView_VisibleRect`）計算——資訊列描述「使用者在螢幕上看到什麼」，不是描述輸出點陣的內部倍率。
+- 螢幕繪製零回歸：`v1_render` 簽章未變；`v2_render` 新增 `scale`／`font` 參數，螢幕呼叫固定傳 `1.0` ＋ `Cmp_UiFont()`。
+- 副作用：150% 縮放時輸出像素量為 2.25 倍（PNG 較大、WIC 編碼較久）；跨不同 DPI 螢幕時 `Snap_PhysicalScale` 每次 Snapshot 重新量測，尺寸自動跟隨。長期建議仍在 manifest 宣告 Per-Monitor V2 並處理 `WM_DPICHANGED`，屆時 `scale` 恆為 1.0，本段程式碼不需再改。

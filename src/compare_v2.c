@@ -289,16 +289,26 @@ static BOOL v2_prepare_backbuffer(cmp_v2_t *state, HDC dc,
     return TRUE;
 }
 
+static RECT v2_scale_rect(const RECT *rect, double scale)
+{
+    RECT scaled;
+    scaled.left = Snap_Round(rect->left * scale);
+    scaled.top = Snap_Round(rect->top * scale);
+    scaled.right = Snap_Round(rect->right * scale);
+    scaled.bottom = Snap_Round(rect->bottom * scale);
+    return scaled;
+}
+
 static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
-                      unsigned int flags)
+                      unsigned int flags, double scale, HFONT font)
 {
     RECT client, viewport, left_clip, right_clip;
-    int split, left_index, right_index;
-    (void)flags;
+    HGDIOBJ old_font;
+    int split, left_index, right_index, line_width;
     client.left = 0;
     client.top = 0;
-    client.right = width;
-    client.bottom = height;
+    client.right = Snap_Round(width * scale);
+    client.bottom = Snap_Round(height * scale);
     FillRect(dc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
     viewport = client;
     split = (int)floor(state->split_fraction * client.right + 0.5);
@@ -314,22 +324,34 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
     right_clip.bottom = client.bottom;
     left_index = v2_image_index(state, 0);
     right_index = v2_image_index(state, 1);
-    Cmp_Blit(dc, state->image[left_index],
-             &state->view[left_index], &viewport, &left_clip);
-    Cmp_Blit(dc, state->image[right_index],
-             &state->view[right_index], &viewport, &right_clip);
+    {
+        cmp_view_t left_view = state->view[left_index];
+        cmp_view_t right_view = state->view[right_index];
+        left_view.zoom *= scale;
+        right_view.zoom *= scale;
+        Cmp_Blit(dc, state->image[left_index], &left_view, &viewport,
+                 &left_clip);
+        Cmp_Blit(dc, state->image[right_index], &right_view, &viewport,
+                 &right_clip);
+    }
     if (client.right > 0) {
         HBRUSH yellow = CreateSolidBrush(RGB(255, 220, 0));
         HGDIOBJ old_brush = SelectObject(dc, yellow);
-        int line_left = split - 1;
-        int line_right = split + 1;
+        int line_left, line_right;
+        line_width = (flags & CMP_RENDER_SNAPSHOT) ? Snap_Round(scale) : 2;
+        if (line_width < 1)
+            line_width = 1;
+        line_left = split - line_width / 2;
+        line_right = line_left + line_width;
         if (line_left < 0) {
             line_left = 0;
-            line_right = client.right < 2 ? client.right : 2;
+            line_right = line_width < client.right ?
+                         line_width : client.right;
         }
         if (line_right > client.right) {
             line_right = client.right;
-            line_left = client.right < 2 ? 0 : client.right - 2;
+            line_left = client.right > line_width ?
+                        client.right - line_width : 0;
         }
         if (line_right > line_left)
             PatBlt(dc, line_left, 0, line_right - line_left,
@@ -339,12 +361,12 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
     }
     {
         char left_label[MAX_PATH + 32], right_label[MAX_PATH + 32];
-        RECT label = { 8, 8, client.right / 2, 32 };
+        RECT label;
         HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
         SetBkMode(dc, OPAQUE);
         SetBkColor(dc, RGB(0, 0, 0));
         SetTextColor(dc, RGB(255, 255, 255));
-        SelectObject(dc, Cmp_UiFont());
+        old_font = SelectObject(dc, font ? font : Cmp_UiFont());
         _snprintf(left_label, sizeof(left_label), "A: %s %.0f%%",
                   state->image[left_index]->name,
                   state->view[left_index].zoom * 100.0);
@@ -353,17 +375,33 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
                   state->view[right_index].zoom * 100.0);
         left_label[sizeof(left_label) - 1] = '\0';
         right_label[sizeof(right_label) - 1] = '\0';
+        if (flags & CMP_RENDER_SNAPSHOT) {
+            RECT logical = { 8, 8, width / 2, 32 };
+            label = v2_scale_rect(&logical, scale);
+        } else {
+            label.left = 8;
+            label.top = 8;
+            label.right = client.right / 2;
+            label.bottom = 32;
+        }
         FillRect(dc, &label, black);
         DrawTextA(dc, left_label, -1, &label,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                   DT_END_ELLIPSIS | DT_NOPREFIX);
-        label.left = client.right / 2;
-        label.right = client.right - 8;
+        if (flags & CMP_RENDER_SNAPSHOT) {
+            RECT logical = { width / 2, 8, width - 8, 32 };
+            label = v2_scale_rect(&logical, scale);
+        } else {
+            label.left = client.right / 2;
+            label.right = client.right - 8;
+        }
         FillRect(dc, &label, black);
         DrawTextA(dc, right_label, -1, &label,
                   DT_RIGHT | DT_VCENTER | DT_SINGLELINE |
                   DT_END_ELLIPSIS | DT_NOPREFIX);
         DeleteObject(black);
+        if (old_font)
+            SelectObject(dc, old_font);
     }
 }
 
@@ -376,7 +414,8 @@ static void v2_paint(cmp_v2_t *state, HWND hwnd)
     QueryPerformanceCounter(&start);
     GetClientRect(hwnd, &client);
     if (v2_prepare_backbuffer(state, dc, client.right, client.bottom)) {
-        v2_render(state, state->mem_dc, client.right, client.bottom, 0);
+        v2_render(state, state->mem_dc, client.right, client.bottom, 0, 1.0,
+                  Cmp_UiFont());
         BitBlt(dc, 0, 0, client.right, client.bottom,
                state->mem_dc, 0, 0, SRCCOPY);
     }
@@ -395,11 +434,24 @@ static void v2_snapshot(cmp_v2_t *state, BOOL copy_only)
     cmp_snap_t snapshot;
     char lines[CMP_MAX_CELLS + 1][256] = { { 0 } };
     char text[256], path[MAX_PATH] = { 0 };
-    int line_count = 0, height, i;
+    double scale;
+    HFONT font;
+    int line_count = 0, height, output_width, output_height, i;
     BOOL copied;
     if (!state || !state->overlay ||
         !GetClientRect(state->overlay, &client))
         return;
+    scale = Snap_PhysicalScale(state->overlay);
+    output_width = Snap_Round(client.right * scale);
+    output_height = Snap_Round(client.bottom * scale);
+    font = CmpSnap_CreateScaledFont(scale);
+    if (output_width <= 0 || output_height <= 0 || !font) {
+        MessageBoxA(state->hwnd, "Could not prepare the snapshot rendering.",
+                    "Snapshot", MB_OK | MB_ICONERROR);
+        if (font)
+            DeleteObject(font);
+        return;
+    }
     GetLocalTime(&now);
     if (state->show_info) {
         _snprintf(text, sizeof(text),
@@ -414,28 +466,37 @@ static void v2_snapshot(cmp_v2_t *state, BOOL copy_only)
         for (i = 0; i < 2; i++) {
             int index = v2_image_index(state, i);
             cmp_image_t *image = state->image[index];
+            RECT visible;
+            int visible_w = 0, visible_h = 0;
+            if (CmpView_VisibleRect(&state->view[index], client.right,
+                                    client.bottom, image->img.w,
+                                    image->img.h, &visible)) {
+                visible_w = visible.right - visible.left;
+                visible_h = visible.bottom - visible.top;
+            }
             _snprintf(text, sizeof(text),
-                      "%c: %s | %.0f%% | %dx%d | %dx%d",
+                      "%c: %s | %.0f%% | src %dx%d | %dx%d",
                       i == 0 ? 'A' : 'B', image->name,
                       state->view[index].zoom * 100.0,
-                      (int)(image->img.w * state->view[index].zoom),
-                      (int)(image->img.h * state->view[index].zoom),
+                      visible_w, visible_h,
                       image->img.w, image->img.h);
             CmpInfo_Add(lines, &line_count, text);
         }
     }
-    height = client.bottom + CmpInfo_Height(Cmp_UiFont(), line_count);
+    height = output_height + CmpInfo_Height(font, line_count);
     if (height <= 0 ||
-        !CmpSnap_Begin(state->hwnd, client.right, height, &snapshot)) {
+        !CmpSnap_Begin(state->hwnd, output_width, height, &snapshot)) {
         MessageBoxA(state->hwnd, "Could not allocate the snapshot image.",
                     "Snapshot", MB_OK | MB_ICONERROR);
+        DeleteObject(font);
         return;
     }
     v2_render(state, snapshot.dc, client.right, client.bottom,
-              CMP_RENDER_SNAPSHOT);
+              CMP_RENDER_SNAPSHOT, scale, font);
     if (line_count)
-        CmpInfo_Draw(snapshot.dc, client.right, client.bottom, Cmp_UiFont(),
+        CmpInfo_Draw(snapshot.dc, output_width, output_height, font,
                      lines, line_count);
+    DeleteObject(font);
     CmpSnap_Finalize(&snapshot);
     if (copy_only)
         copied = CmpSnap_CopyToClipboard(state->hwnd, snapshot.bitmap);
