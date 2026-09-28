@@ -17,7 +17,10 @@
 #include "export.h"
 #include "histpanel.h"
 #include "image_save.h"
+#include "monitor.h"
+#include "rename.h"
 #include "rotate.h"
+#include "settings.h"
 #include "table.h"
 
 #define IDM_OPEN       101
@@ -26,6 +29,8 @@
 #define IDM_PREVIOUS   104
 #define IDM_NEXT       105
 #define IDM_SAVE_IMAGE 106
+#define IDM_RENAME_FILE 107
+#define IDM_MONITOR_SETTINGS 108
 #define IDM_DRAG       111
 #define IDM_GRID3      112
 #define IDM_GRID5      113
@@ -57,12 +62,34 @@
 #define IDC_HISTPANEL  1007
 #define IDD_ROTATE_ANGLE 201
 #define IDC_ROTATE_ANGLE 202
+#define IDD_MONITOR_SETTINGS 210
+#define IDC_MON_PATH1 211
+#define IDC_MON_PATH2 212
+#define IDC_MON_PATH3 213
+#define IDC_MON_BROWSE1 214
+#define IDC_MON_BROWSE2 215
+#define IDC_MON_BROWSE3 216
+#define IDC_MON_ACTIVE1 217
+#define IDC_MON_ACTIVE2 218
+#define IDC_MON_ACTIVE3 219
+#define IDD_NEW_FILE_PROMPT 220
+#define IDC_PROMPT_THUMB 221
+#define IDC_PROMPT_NAME 222
+#define IDC_PROMPT_BTN_RENAME 223
+#define IDC_PROMPT_BTN_RENAME_OPEN 224
+#define IDC_PROMPT_BTN_COMPARE_ADD 225
+#define IDC_PROMPT_BTN_COMPARE_NOW 226
+#define IDD_RENAME_INPUT 230
+#define IDC_RENAME_EDIT 231
 #define SB_PART_POS    0
 #define SB_PART_MSG    1
 #define SB_PART_MODE   2
 #define SB_PART_INDEX  3
 #define SB_PART_TIME   4
 #define SB_PART_COUNT  5
+#define WM_APP_DRAIN_NEW_FILES (WM_APP + 102)
+#define PROMPT_QUEUE_CAPACITY 64
+#define PROMPT_DRAIN_TIMER 1
 
 app_t g_app;
 
@@ -87,6 +114,12 @@ static BOOL g_current_exact;
 static BOOL g_browsing;
 static char g_nav_status[128] = "Ready";
 static char g_status_index[32];
+static char s_persistent_prefix[MAX_PATH];
+static char *s_pending_files[PROMPT_QUEUE_CAPACITY];
+static size_t s_pending_head;
+static size_t s_pending_count;
+static unsigned int s_dropped_files;
+static BOOL s_prompt_open;
 
 static BOOL App_InitCommonControls(void);
 static void Layout(void);
@@ -107,6 +140,9 @@ static void CompareCurrentWithNext(void);
 static BOOL App_CompareOpenPaths(char paths[CMP_MAX_CELLS][MAX_PATH],
                                  int count, cmp_open_mode_t mode);
 static void App_OnDropFiles(HDROP drop);
+static void App_HandleNewFileArrival(const char *path);
+static void App_DrainPromptQueue(void);
+static void App_SchedulePromptQueue(void);
 
 static BOOL copy_utf8_to_acp(char *destination, size_t capacity,
                              const char *source)
@@ -313,7 +349,8 @@ static INT_PTR CALLBACK RotateAngleDlgProc(HWND dialog, UINT message,
 static void App_UpdateImageMenu(void)
 {
     static const UINT commands[] = {
-        IDM_SAVE_IMAGE, IDM_ROT90, IDM_ROT180, IDM_ROT270, IDM_ROT_ANY
+        IDM_SAVE_IMAGE, IDM_RENAME_FILE, IDM_ROT90, IDM_ROT180, IDM_ROT270,
+        IDM_ROT_ANY
     };
     HMENU menu = GetMenu(g_app.hwnd_main);
     UINT state = g_app.img.valid ? MF_ENABLED : MF_GRAYED;
@@ -1390,6 +1427,569 @@ static void CompareCurrentWithNext(void)
     CmpImage_Unref(next);
 }
 
+typedef enum {
+    PROMPT_ACTION_CANCEL = 0,
+    PROMPT_ACTION_RENAME = 10,
+    PROMPT_ACTION_RENAME_OPEN,
+    PROMPT_ACTION_COMPARE_ADD,
+    PROMPT_ACTION_COMPARE_NOW
+} prompt_action_t;
+
+typedef struct {
+    const char *path;
+    char new_name[MAX_PATH];
+    image_t thumbnail;
+} new_file_prompt_t;
+
+static void prompt_draw_thumbnail(DRAWITEMSTRUCT *draw,
+                                  const image_t *image)
+{
+    RECT rc;
+    BITMAPINFO info;
+    int width, height;
+    double scale;
+    int draw_width, draw_height, x, y;
+
+    if (!draw)
+        return;
+    rc = draw->rcItem;
+    FillRect(draw->hDC, &rc, GetSysColorBrush(COLOR_WINDOW));
+    if (!image || !image->valid)
+        return;
+    width = rc.right - rc.left;
+    height = rc.bottom - rc.top;
+    scale = (double)width / image->w;
+    if ((double)height / image->h < scale)
+        scale = (double)height / image->h;
+    draw_width = (int)(image->w * scale);
+    draw_height = (int)(image->h * scale);
+    x = rc.left + (width - draw_width) / 2;
+    y = rc.top + (height - draw_height) / 2;
+    ZeroMemory(&info, sizeof(info));
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = image->w;
+    info.bmiHeader.biHeight = -image->h;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    SetStretchBltMode(draw->hDC, HALFTONE);
+    StretchDIBits(draw->hDC, x, y, draw_width, draw_height, 0, 0,
+                  image->w, image->h, image->px, &info, DIB_RGB_COLORS,
+                  SRCCOPY);
+}
+
+static INT_PTR CALLBACK new_file_prompt_proc(HWND dialog, UINT message,
+                                             WPARAM wparam, LPARAM lparam)
+{
+    static const int compare_buttons[] = {
+        IDC_PROMPT_BTN_COMPARE_ADD, IDC_PROMPT_BTN_COMPARE_NOW
+    };
+    new_file_prompt_t *prompt =
+        (new_file_prompt_t *)GetWindowLongPtrA(dialog, GWLP_USERDATA);
+    int i;
+
+    if (message == WM_INITDIALOG) {
+        char title[MAX_PATH + 48];
+        char default_name[MAX_PATH];
+        char prefix[MAX_PATH];
+        const char *base;
+        const char *extension;
+        size_t prefix_length, base_length;
+
+        prompt = (new_file_prompt_t *)lparam;
+        SetWindowLongPtrA(dialog, GWLP_USERDATA, (LONG_PTR)prompt);
+        _snprintf(title, sizeof(title), "New image detected: %s", prompt->path);
+        title[sizeof(title) - 1] = '\0';
+        SetWindowTextA(dialog, title);
+        base = image_basename(prompt->path);
+        extension = PathFindExtensionA(base);
+        base_length = extension ? (size_t)(extension - base) : strlen(base);
+        prefix[0] = '\0';
+        if (!s_persistent_prefix[0])
+            Settings_LoadLastRenamePrefix(s_persistent_prefix,
+                                          sizeof(s_persistent_prefix));
+        strncpy(prefix, s_persistent_prefix, sizeof(prefix) - 1);
+        prefix[sizeof(prefix) - 1] = '\0';
+        prefix_length = strlen(prefix);
+        if (prefix_length >= sizeof(default_name))
+            prefix_length = sizeof(default_name) - 1;
+        memcpy(default_name, prefix, prefix_length);
+        if (base_length > sizeof(default_name) - prefix_length - 1)
+            base_length = sizeof(default_name) - prefix_length - 1;
+        memcpy(default_name + prefix_length, base, base_length);
+        default_name[prefix_length + base_length] = '\0';
+        SetDlgItemTextA(dialog, IDC_PROMPT_NAME, default_name);
+        if (Image_LoadWIC(&prompt->thumbnail, prompt->path) != 0)
+            OutputDebugStringA("ROI Analyzer: could not load new-file thumbnail.\n");
+        for (i = 0; i < (int)(sizeof(compare_buttons) /
+                              sizeof(compare_buttons[0])); i++)
+            EnableWindow(GetDlgItem(dialog, compare_buttons[i]),
+                         g_app.img.valid);
+        SetFocus(GetDlgItem(dialog, IDC_PROMPT_NAME));
+        SendDlgItemMessageA(dialog, IDC_PROMPT_NAME, EM_SETSEL, 0, -1);
+        return FALSE;
+    }
+    if (message == WM_DRAWITEM) {
+        DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
+        if (draw && draw->CtlID == IDC_PROMPT_THUMB) {
+            prompt_draw_thumbnail(draw, prompt ? &prompt->thumbnail : NULL);
+            return TRUE;
+        }
+    }
+    if (message == WM_COMMAND) {
+        int id = LOWORD(wparam);
+        int action = PROMPT_ACTION_CANCEL;
+        char error[160];
+        if (id == IDC_PROMPT_BTN_RENAME)
+            action = PROMPT_ACTION_RENAME;
+        else if (id == IDC_PROMPT_BTN_RENAME_OPEN)
+            action = PROMPT_ACTION_RENAME_OPEN;
+        else if (id == IDC_PROMPT_BTN_COMPARE_ADD)
+            action = PROMPT_ACTION_COMPARE_ADD;
+        else if (id == IDC_PROMPT_BTN_COMPARE_NOW)
+            action = PROMPT_ACTION_COMPARE_NOW;
+        else if (id == IDCANCEL)
+            EndDialog(dialog, PROMPT_ACTION_CANCEL);
+        if (action != PROMPT_ACTION_CANCEL) {
+            GetDlgItemTextA(dialog, IDC_PROMPT_NAME, prompt->new_name,
+                            MAX_PATH);
+            if (!Rename_ValidateFileName(prompt->new_name, error,
+                                         sizeof(error))) {
+                MessageBoxA(dialog, error, "Rename Image",
+                            MB_OK | MB_ICONWARNING);
+                SetFocus(GetDlgItem(dialog, IDC_PROMPT_NAME));
+                return TRUE;
+            }
+            EndDialog(dialog, action);
+        }
+        return TRUE;
+    }
+    if (message == WM_DESTROY && prompt)
+        Image_Free(&prompt->thumbnail);
+    return FALSE;
+}
+
+static BOOL App_BuildRenamedPath(const char *old_path, const char *new_name,
+                                 char new_path[MAX_PATH])
+{
+    char directory[MAX_PATH], full_path[MAX_PATH];
+    const char *extension;
+    size_t length;
+    DWORD full_path_length;
+    int written;
+    full_path_length = GetFullPathNameA(old_path, MAX_PATH, full_path, NULL);
+    if (full_path_length == 0 || full_path_length >= (DWORD)MAX_PATH)
+        return FALSE;
+    extension = PathFindExtensionA(full_path);
+    strncpy(directory, full_path, sizeof(directory) - 1);
+    directory[sizeof(directory) - 1] = '\0';
+    if (!PathRemoveFileSpecA(directory))
+        return FALSE;
+    length = strlen(directory);
+    written = _snprintf(new_path, MAX_PATH, "%s%s%s%s", directory,
+                        length && directory[length - 1] != '\\' &&
+                        directory[length - 1] != '/' ? "\\" : "",
+                        new_name, extension ? extension : "");
+    new_path[MAX_PATH - 1] = '\0';
+    return written >= 0 && written < MAX_PATH;
+}
+
+static void App_SaveRenamePrefix(const char *new_path, const char *old_path)
+{
+    char new_base[MAX_PATH], old_base[MAX_PATH], prefix[MAX_PATH];
+    const char *new_name = image_basename(new_path);
+    const char *old_name = image_basename(old_path);
+    const char *new_ext = PathFindExtensionA(new_name);
+    const char *old_ext = PathFindExtensionA(old_name);
+    size_t new_length = new_ext ? (size_t)(new_ext - new_name) :
+                                  strlen(new_name);
+    size_t old_length = old_ext ? (size_t)(old_ext - old_name) :
+                                  strlen(old_name);
+    if (new_length >= sizeof(new_base))
+        new_length = sizeof(new_base) - 1;
+    if (old_length >= sizeof(old_base))
+        old_length = sizeof(old_base) - 1;
+    memcpy(new_base, new_name, new_length);
+    new_base[new_length] = '\0';
+    memcpy(old_base, old_name, old_length);
+    old_base[old_length] = '\0';
+    if (ExtractPrefix(new_base, old_base, prefix, sizeof(prefix)) &&
+        prefix[0]) {
+        strncpy(s_persistent_prefix, prefix, sizeof(s_persistent_prefix) - 1);
+        s_persistent_prefix[sizeof(s_persistent_prefix) - 1] = '\0';
+        if (!Settings_SaveLastRenamePrefix(s_persistent_prefix))
+            MessageBoxA(g_app.hwnd_main,
+                        "The file was renamed, but the remembered prefix could not be saved.",
+                        "Rename Image", MB_OK | MB_ICONWARNING);
+    }
+}
+
+static void App_RefreshListAfterRename(const char *path)
+{
+    char folder[MAX_PATH];
+    size_t length;
+    BOOL exact = FALSE;
+    strncpy(folder, path, sizeof(folder) - 1);
+    folder[sizeof(folder) - 1] = '\0';
+    if (!PathRemoveFileSpecA(folder) || !g_app.files.dir[0])
+        return;
+    length = strlen(folder);
+    if (length && folder[length - 1] != '\\' && folder[length - 1] != '/') {
+        if (length + 1 >= sizeof(folder))
+            return;
+        folder[length++] = '\\';
+        folder[length] = '\0';
+    }
+    if (_stricmp(folder, g_app.files.dir) != 0)
+        return;
+    if (FileList_Refresh(&g_app.files, path)) {
+        g_app.file_idx = g_app.img.valid ?
+            FileList_Find(&g_app.files, image_basename(g_app.img.path), &exact) :
+            -1;
+        g_current_exact = g_app.img.valid && exact;
+    } else {
+        g_app.file_idx = -1;
+        g_current_exact = FALSE;
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  "Renamed; could not refresh current folder");
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+    }
+    UpdateTitle();
+    App_StatusSetIndex();
+    App_UpdateStatus();
+}
+
+static BOOL App_RenameArrival(const char *old_path, const char *new_name,
+                              char new_path[MAX_PATH])
+{
+    char error[160];
+    DWORD result;
+    BOOL overwrite = FALSE;
+
+    if (!Rename_ValidateFileName(new_name, error, sizeof(error))) {
+        MessageBoxA(g_app.hwnd_main, error, "Rename Image",
+                    MB_OK | MB_ICONWARNING);
+        return FALSE;
+    }
+    if (!App_BuildRenamedPath(old_path, new_name, new_path)) {
+        MessageBoxA(g_app.hwnd_main, "The new file path is too long.",
+                    "Rename Image", MB_OK | MB_ICONWARNING);
+        return FALSE;
+    }
+    if (_stricmp(old_path, new_path) == 0) {
+        MessageBoxA(g_app.hwnd_main, "The file name is unchanged.",
+                    "Rename Image", MB_OK | MB_ICONINFORMATION);
+        return FALSE;
+    }
+    if (GetFileAttributesA(new_path) != INVALID_FILE_ATTRIBUTES) {
+        if (MessageBoxA(g_app.hwnd_main,
+                        "Target file already exists. Overwrite?",
+                        "Rename Image", MB_YESNO | MB_ICONWARNING) != IDYES)
+            return FALSE;
+        overwrite = TRUE;
+    }
+    Monitor_NoteSelfRename(new_path);
+    result = Rename_Execute(old_path, new_name, new_path, MAX_PATH, overwrite);
+    if (result != ERROR_SUCCESS) {
+        char message[192];
+        _snprintf(message, sizeof(message),
+                  "Could not rename file (Windows error %lu).",
+                  (unsigned long)result);
+        message[sizeof(message) - 1] = '\0';
+        MessageBoxA(g_app.hwnd_main, message, "Rename Image",
+                    MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    App_SaveRenamePrefix(new_path, old_path);
+    return TRUE;
+}
+
+static void App_ShowNewFilePrompt(const char *path)
+{
+    new_file_prompt_t prompt;
+    char new_path[MAX_PATH];
+    int action;
+
+    if (Monitor_IsSelfRename(path))
+        return;
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+        return;
+    ZeroMemory(&prompt, sizeof(prompt));
+    prompt.path = path;
+    action = (int)DialogBoxParamA(GetModuleHandleA(NULL),
+                                  MAKEINTRESOURCEA(IDD_NEW_FILE_PROMPT),
+                                  g_app.hwnd_main, new_file_prompt_proc,
+                                  (LPARAM)&prompt);
+    if (action == PROMPT_ACTION_CANCEL || action == -1)
+        return;
+    if (!App_RenameArrival(path, prompt.new_name, new_path))
+        return;
+    App_RefreshListAfterRename(new_path);
+    if (action == PROMPT_ACTION_RENAME_OPEN) {
+        OpenImageFile(new_path);
+    } else if (action == PROMPT_ACTION_COMPARE_ADD) {
+        char paths[CMP_MAX_CELLS][MAX_PATH];
+        ZeroMemory(paths, sizeof(paths));
+        lstrcpynA(paths[0], new_path, MAX_PATH);
+        App_CompareOpenPaths(paths, 1, CMP_OPEN_WITH_CURRENT);
+    } else if (action == PROMPT_ACTION_COMPARE_NOW) {
+        if (!Compare_CanOpen(2)) {
+            MessageBoxA(g_app.hwnd_main,
+                        "The comparison image limit (8) is reached.",
+                        "Compare Files", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        cmp_image_t *current = CmpImage_FromImage(&g_app.img);
+        cmp_image_t *added = CmpImage_Load(new_path);
+        if (!current || !added) {
+            MessageBoxA(g_app.hwnd_main, "Could not load images for comparison.",
+                        "Compare Files", MB_OK | MB_ICONERROR);
+        } else if (!CompareV2_Open(current, added)) {
+            MessageBoxA(g_app.hwnd_main,
+                        "Could not create the comparison window.",
+                        "Compare Files", MB_OK | MB_ICONERROR);
+        }
+        CmpImage_Unref(current);
+        CmpImage_Unref(added);
+    }
+}
+
+typedef struct {
+    char name[MAX_PATH];
+} rename_dialog_data_t;
+
+static INT_PTR CALLBACK rename_input_proc(HWND dialog, UINT message,
+                                          WPARAM wparam, LPARAM lparam)
+{
+    rename_dialog_data_t *data =
+        (rename_dialog_data_t *)GetWindowLongPtrA(dialog, GWLP_USERDATA);
+    if (message == WM_INITDIALOG) {
+        data = (rename_dialog_data_t *)lparam;
+        SetWindowLongPtrA(dialog, GWLP_USERDATA, (LONG_PTR)data);
+        SetDlgItemTextA(dialog, IDC_RENAME_EDIT, data->name);
+        SetFocus(GetDlgItem(dialog, IDC_RENAME_EDIT));
+        SendDlgItemMessageA(dialog, IDC_RENAME_EDIT, EM_SETSEL, 0, -1);
+        return FALSE;
+    }
+    if (message != WM_COMMAND)
+        return FALSE;
+    if (LOWORD(wparam) == IDOK) {
+        char error[160];
+        GetDlgItemTextA(dialog, IDC_RENAME_EDIT, data->name, MAX_PATH);
+        if (!Rename_ValidateFileName(data->name, error, sizeof(error))) {
+            MessageBoxA(dialog, error, "Rename Image",
+                        MB_OK | MB_ICONWARNING);
+            SetFocus(GetDlgItem(dialog, IDC_RENAME_EDIT));
+            return TRUE;
+        }
+        EndDialog(dialog, IDOK);
+        return TRUE;
+    }
+    if (LOWORD(wparam) == IDCANCEL) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void App_PerformRename(void)
+{
+    char old_path[MAX_PATH], new_path[MAX_PATH], default_name[MAX_PATH];
+    char old_base[MAX_PATH], prefix[MAX_PATH], error[160];
+    const char *file_name, *extension;
+    size_t base_length, prefix_length;
+    rename_dialog_data_t dialog_data;
+    int dialog_result;
+    DWORD rename_result;
+    BOOL overwrite = FALSE;
+
+    if (!g_app.img.valid || !g_app.img.path[0]) {
+        MessageBoxA(g_app.hwnd_main, "No current image to rename.",
+                    "Rename Image", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (GetFileAttributesA(g_app.img.path) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxA(g_app.hwnd_main,
+                    "Current image file not found on disk.",
+                    "Rename Image", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (!App_ConfirmDiscard())
+        return;
+    Compare_CloseAll();
+    if (g_app.drag.dragging) {
+        g_app.drag.dragging = FALSE;
+        ReleaseCapture();
+    }
+    file_name = image_basename(g_app.img.path);
+    extension = PathFindExtensionA(file_name);
+    base_length = extension ? (size_t)(extension - file_name) :
+                              strlen(file_name);
+    if (base_length >= sizeof(old_base))
+        base_length = sizeof(old_base) - 1;
+    memcpy(old_base, file_name, base_length);
+    old_base[base_length] = '\0';
+    prefix[0] = '\0';
+    if (!Settings_LoadLastRenamePrefix(prefix, sizeof(prefix)))
+        prefix[0] = '\0';
+    prefix_length = strlen(prefix);
+    if (prefix_length > sizeof(default_name) - 1)
+        prefix_length = sizeof(default_name) - 1;
+    memcpy(default_name, prefix, prefix_length);
+    if (base_length > sizeof(default_name) - prefix_length - 1)
+        base_length = sizeof(default_name) - prefix_length - 1;
+    memcpy(default_name + prefix_length, old_base, base_length);
+    default_name[prefix_length + base_length] = '\0';
+    lstrcpynA(dialog_data.name, default_name, MAX_PATH);
+    dialog_result = (int)DialogBoxParamA(GetModuleHandleA(NULL),
+                                         MAKEINTRESOURCEA(IDD_RENAME_INPUT),
+                                         g_app.hwnd_main, rename_input_proc,
+                                         (LPARAM)&dialog_data);
+    if (dialog_result != IDOK ||
+        strcmp(dialog_data.name, old_base) == 0)
+        return;
+    strncpy(old_path, g_app.img.path, sizeof(old_path) - 1);
+    old_path[sizeof(old_path) - 1] = '\0';
+    if (!App_BuildRenamedPath(old_path, dialog_data.name, new_path)) {
+        MessageBoxA(g_app.hwnd_main, "The new file path is too long.",
+                    "Rename Image", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (GetFileAttributesA(new_path) != INVALID_FILE_ATTRIBUTES) {
+        if (MessageBoxA(g_app.hwnd_main,
+                        "Target file already exists. Overwrite?",
+                        "Rename Image", MB_YESNO | MB_ICONWARNING) != IDYES)
+            return;
+        overwrite = TRUE;
+    }
+
+    Image_Free(&g_app.img);
+    ViewPyr_Free(&g_app.pyramid);
+    g_app.pyramid_attempted = FALSE;
+    g_app.pyramid_pending = FALSE;
+    ROI_Clear(&g_app.rois, &g_app.drag);
+    Table_Clear(g_app.hwnd_table);
+    HistPanel_ClearSource(g_app.hwnd_hist);
+    g_app.is_modified = FALSE;
+    g_app.analysis_stale = FALSE;
+    g_app.file_idx = -1;
+    g_current_exact = FALSE;
+    InvalidateRect(g_app.hwnd_canvas, NULL, TRUE);
+    UpdateWindow(g_app.hwnd_canvas);
+
+    Monitor_NoteSelfRename(new_path);
+    rename_result = Rename_Execute(old_path, dialog_data.name, new_path,
+                                   sizeof(new_path), overwrite);
+    if (rename_result != ERROR_SUCCESS) {
+        _snprintf(error, sizeof(error),
+                  "Could not rename file (Windows error %lu).",
+                  (unsigned long)rename_result);
+        error[sizeof(error) - 1] = '\0';
+        MessageBoxA(g_app.hwnd_main, error, "Rename Image",
+                    MB_OK | MB_ICONERROR);
+        OpenImageFile(old_path);
+        return;
+    }
+    App_SaveRenamePrefix(new_path, old_path);
+    if (OpenImageFile(new_path)) {
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  "Renamed %s to %s", image_basename(old_path),
+                  image_basename(new_path));
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+        UpdateTitle();
+        App_UpdateStatus();
+    }
+}
+
+static void App_HandleNewFileArrival(const char *path)
+{
+    HANDLE mutex;
+    DWORD wait_result;
+    char *copy;
+    BOOL queue_full = FALSE;
+    BOOL allocation_failed = FALSE;
+    BOOL schedule_prompt;
+
+    if (!path || !path[0])
+        return;
+    mutex = CreateMutexA(NULL, FALSE, "RoiAnalyzer_NewFileMutex");
+    if (!mutex) {
+        OutputDebugStringA("ROI Analyzer: could not create the new-file mutex.\n");
+        return;
+    }
+    wait_result = WaitForSingleObject(mutex, 0);
+    if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
+        if (wait_result == WAIT_FAILED)
+            OutputDebugStringA("ROI Analyzer: could not acquire the new-file mutex.\n");
+        CloseHandle(mutex);
+        return;
+    }
+    schedule_prompt = !s_prompt_open;
+    if (s_pending_count == PROMPT_QUEUE_CAPACITY) {
+        s_dropped_files++;
+        queue_full = TRUE;
+    } else {
+        copy = _strdup(path);
+        if (!copy) {
+            OutputDebugStringA("ROI Analyzer: could not queue a monitored file.\n");
+            s_dropped_files++;
+            allocation_failed = TRUE;
+        } else {
+            size_t tail = (s_pending_head + s_pending_count) %
+                          PROMPT_QUEUE_CAPACITY;
+            s_pending_files[tail] = copy;
+            s_pending_count++;
+        }
+    }
+    if (!ReleaseMutex(mutex))
+        OutputDebugStringA("ROI Analyzer: could not release the new-file mutex.\n");
+    CloseHandle(mutex);
+    if (queue_full || allocation_failed) {
+        _snprintf(g_nav_status, sizeof(g_nav_status),
+                  queue_full ? "Monitor queue full; %u new file(s) skipped" :
+                               "Monitor could not queue file; %u skipped",
+                  s_dropped_files);
+        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+        App_UpdateStatus();
+    }
+    if (schedule_prompt && s_pending_count)
+        App_SchedulePromptQueue();
+}
+
+static void App_SchedulePromptQueue(void)
+{
+    if (!s_pending_count || s_prompt_open)
+        return;
+    if (!PostMessageA(g_app.hwnd_main, WM_APP_DRAIN_NEW_FILES, 0, 0)) {
+        OutputDebugStringA("ROI Analyzer: could not schedule the pending file prompt.\n");
+        if (!SetTimer(g_app.hwnd_main, PROMPT_DRAIN_TIMER, 250, NULL))
+            OutputDebugStringA("ROI Analyzer: could not start the prompt retry timer.\n");
+    }
+}
+
+static void App_DrainPromptQueue(void)
+{
+    char *path;
+
+    if (s_prompt_open || s_pending_count == 0)
+        return;
+    if (!IsWindowEnabled(g_app.hwnd_main)) {
+        SetTimer(g_app.hwnd_main, PROMPT_DRAIN_TIMER, 250, NULL);
+        return;
+    }
+    KillTimer(g_app.hwnd_main, PROMPT_DRAIN_TIMER);
+    path = s_pending_files[s_pending_head];
+    s_pending_files[s_pending_head] = NULL;
+    s_pending_head = (s_pending_head + 1) % PROMPT_QUEUE_CAPACITY;
+    s_pending_count--;
+    s_prompt_open = TRUE;
+    App_ShowNewFilePrompt(path);
+    free(path);
+    s_prompt_open = FALSE;
+    if (s_pending_count)
+        App_SchedulePromptQueue();
+}
+
 static void ExportCurrent(void)
 {
     char paths[3][MAX_PATH];
@@ -1619,6 +2219,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             SendMessageA(hwnd, WM_CLOSE, 0, 0);
         else if (id == IDM_SAVE_IMAGE)
             App_SaveImage();
+        else if (id == IDM_RENAME_FILE)
+            App_PerformRename();
+        else if (id == IDM_MONITOR_SETTINGS)
+            Monitor_ShowSettingsDialog(hwnd);
         else if (id == IDM_ROT90)
             App_RotateOrthogonal(1);
         else if (id == IDM_ROT180)
@@ -1721,12 +2325,43 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         App_OnDropFiles((HDROP)wparam);
         return 0;
     }
+    case WM_APP_NEW_FILE: {
+        char *path = (char *)lparam;
+        App_HandleNewFileArrival(path);
+        free(path);
+        return 0;
+    }
+    case WM_APP_DRAIN_NEW_FILES:
+        App_DrainPromptQueue();
+        return 0;
+    case WM_TIMER:
+        if (wparam == PROMPT_DRAIN_TIMER) {
+            KillTimer(hwnd, PROMPT_DRAIN_TIMER);
+            App_DrainPromptQueue();
+            return 0;
+        }
+        break;
     case WM_CLOSE:
         if (!App_ConfirmDiscard())
             return 0;
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        Monitor_Shutdown();
+        KillTimer(hwnd, PROMPT_DRAIN_TIMER);
+        {
+            MSG pending;
+            while (PeekMessageA(&pending, hwnd, WM_APP_NEW_FILE,
+                                WM_APP_NEW_FILE, PM_REMOVE))
+                free((void *)pending.lParam);
+            while (s_pending_count) {
+                free(s_pending_files[s_pending_head]);
+                s_pending_files[s_pending_head] = NULL;
+                s_pending_head = (s_pending_head + 1) %
+                                 PROMPT_QUEUE_CAPACITY;
+                s_pending_count--;
+            }
+        }
         Compare_CloseAll();
         DragAcceptFiles(hwnd, FALSE);
         PostQuitMessage(0);
@@ -1747,9 +2382,12 @@ static HMENU CreateMainMenu(void)
 
     AppendMenuA(file, MF_STRING, IDM_OPEN, "Open...\tO");
     AppendMenuA(file, MF_STRING, IDM_SAVE_IMAGE, "Save Image\tCtrl+S");
+    AppendMenuA(file, MF_STRING, IDM_RENAME_FILE, "Rename File...\tF2");
     AppendMenuA(file, MF_STRING, IDM_PREVIOUS, "Previous Image");
     AppendMenuA(file, MF_STRING, IDM_NEXT, "Next Image");
     AppendMenuA(file, MF_STRING, IDM_EXPORT, "Export Log\tCtrl+E");
+    AppendMenuA(file, MF_STRING, IDM_MONITOR_SETTINGS,
+                "Folder Monitor Settings...");
     AppendMenuA(file, MF_SEPARATOR, 0, NULL);
     AppendMenuA(file, MF_STRING, IDM_EXIT, "Exit");
     AppendMenuA(mode, MF_STRING | MF_CHECKED, IDM_DRAG, "Drag\t1");
@@ -1805,7 +2443,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         { FVIRTKEY, 'L', IDM_HIST_LOG },
         { FVIRTKEY | FCONTROL, 'S', IDM_SAVE_IMAGE },
         { FVIRTKEY | FCONTROL, 'K', IDM_COMPARE_FILES },
-        { FVIRTKEY, 'K', IDM_COMPARE_NEXT }
+        { FVIRTKEY, 'K', IDM_COMPARE_NEXT },
+        { FVIRTKEY, VK_F2, IDM_RENAME_FILE }
     };
     MSG msg;
     int screen_width, screen_height, width, height, x, y;
@@ -1904,6 +2543,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     UpdateWindow(g_app.hwnd_main);
     UpdateTitle();
     App_UpdateStatus();
+    if (!Settings_LoadLastRenamePrefix(s_persistent_prefix,
+                                       sizeof(s_persistent_prefix)))
+        s_persistent_prefix[0] = '\0';
+    if (!Monitor_Init(g_app.hwnd_main))
+        MessageBoxA(g_app.hwnd_main,
+                    "Could not initialize the folder monitor.",
+                    "ROI Analyzer", MB_OK | MB_ICONWARNING);
     if (command_line && command_line[0]) {
         char path[MAX_PATH];
         size_t length = strlen(command_line);

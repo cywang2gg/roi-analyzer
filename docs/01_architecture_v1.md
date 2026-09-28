@@ -1,10 +1,12 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.8 | 日期：2026-09-28 | 影像旋轉（90°／180°／270°／任意角度）＋未存檔詢問防護＋WIC PNG 覆寫存檔（v2.7 增補、直方圖 v1.3 併入）
+> 版本：v2.9 | 日期：2026-09-28 | 資料夾監控（ReadDirectoryChangesW）＋新檔提示彈窗＋更名（F2）＋INI 持久化＋self-trigger 三道防線（v2.8 旋轉併入）
 
 ## 變更歷史
 
-- **v2.8（2026-09-28）**：影像旋轉（`src/rotate.h/.c`：正交無損搬移＋任意角度雙線性插值；ROI inclusive-rect 座標變換，正交直接變換＋重分析，任意角度清空手動框＋格線重建）。未存檔防護（`app_t.is_modified`；`App_ConfirmDiscard()` Yes／No／Cancel；6 攔截點：導覽、開檔、拖放、開比較視窗、新增 `WM_CLOSE`、`IDM_EXIT` 改走 `WM_CLOSE`）。`File > Save Image (Ctrl+S)` 經 `Image_SavePNG()`（WIC PNG 原子覆寫；焦點在比較視窗時 `Ctrl+S` 維持 Snapshot 語義，由 `Compare_PreTranslate`＋C6 guard 天然區隔）。旋轉時 `Compare_CloseAll()`。選單新增頂層 `Image`（旋轉 4 項＋任意角度對話框 `IDD_ROTATE_ANGLE`）；無圖時 5 項灰化；標題列／狀態列 `*` 標記。詳見 `rotate_v2_8_architecture.md`。
+- **v2.9（2026-09-28）**：資料夾監控（`src/monitor.h/.c` 約 600 行：`ReadDirectoryChangesW`＋Overlapped＋背景 worker＋`WaitForMultipleObjects` 稠密壓縮；寫入完成等待限背景執行緒 `Sleep(500)`＋`File_WaitForWriteComplete`；副檔名白名單 png/jpg/jpeg/bmp）。新檔提示彈窗（`IDD_NEW_FILE_PROMPT`：WIC 唯讀縮圖＋檔名輸入＋僅更名／更名並開啟／加入比較／立即比較／取消；單一檢查點原則，不做前置 `ConfirmDiscard`；比較分支 `Unref`；無主圖時比較按鈕禁用）。更名（`src/rename.h/.c` 約 300 行：`ExtractPrefix`＋`is_reserved_base`＋檔名校驗 228＋`MoveFileExA` 覆寫前 `.bak`／`_conflict_N` 備份＋關聯 log 連動搬移失敗只警告）。設定持久化（`src/settings.h/.c` 約 110 行：exe 同目錄 `roi_analyzer.ini`，Monitor Path0-2/Active0-2＋Rename LastRenamePrefix）。`File > Rename File... (F2)`＋`Folder Monitor Settings...`；IDM 107/108、IDD 210/220/230；F2 進加速鍵表＋灰化陣列。self-trigger 迴圈抑制三道防線（事前登記＋worker 發送前二次檢查＋UI `Monitor_IsSelfRename` 終端攔截；ring 16＋SRWLock＋5 秒窗＋`GetFullPathNameA` 標準化）。詳見 `monitor_rename_architecture.md`。
+
+- **v2.8（2026-09-28）**：影像旋轉
 
 - **v2.7 增補（2026-09-27）**：主視窗多檔拖放（`CmpDrop_Collect` 共用收集：W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP；不按 `Ctrl` 且 ≥2 張時主視窗載入第一張＋V1 開全部，按 `Ctrl` 時含目前影像且主視窗不變）。比較視窗 Snapshot（`compare_snap.c` 約 550 行：`CmpSnap_Begin/Finalize/End`＋WIC PNG 編碼＋`CF_BITMAP` 剪貼簿；按鈕與 `Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存、`Ctrl+C` 只複製；存檔位置為影像所在資料夾，檔名 `snap_<A>_vs_<B>_時間戳`，失敗時開另存對話框）。Snapshot 輸出尺寸改以**螢幕實際佔用像素**（`Snap_PhysicalScale` 動態切換執行緒 DPI 感知量測，維持 manifest DPI-unaware；`(u,v)` 不變、以 `z×scale` 渲染，可見範圍與螢幕相同但無系統點陣放大模糊）。V1／V2 工具列加 `Info bar` 核取方塊。C11：比較模組與 `export` 的路徑拆解改用 shlwapi（DBCS 安全）。詳見 `compareformV1V2_architecture_.md` §14。
 - **v2.7（2026-09-27）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像以參考計數 `cmp_image_t` 共享，目前影像以 `Image_Clone` 記憶體複製交付。詳見 `compareformV1V2_architecture_.md`（定稿 C1～C10）。直方圖命令 ID 移至 161～166；`View` 選單新增 `Compare Files… (Ctrl+K)`／`Compare Current with Next (K)`。
@@ -48,6 +50,9 @@ roi-analyzer/
 │   ├── image.h/.c     # WIC 優先、GDI+ fallback，解碼為 32 位元 BGRA
 │   │                  # 另提供 Image_Clone（malloc＋memcpy，供比較視窗交付目前影像）
 │   ├── image_wic.c    # WIC 記憶體解碼與 BGRA CopyPixels
+│   ├── settings.h/.c    # INI 持久化：監控路徑＋前綴記憶（v2.9）
+│   ├── monitor.h/.c     # 資料夾監控 worker＋self-trigger 抑制 ring（v2.9）
+│   ├── rename.h/.c      # 更名核心：校驗＋MoveFileExA＋log 連動（v2.9）
 │   ├── image_save.h/.c  # WIC PNG 原子覆寫存檔（v2.8 旋轉後存檔）
 │   ├── rotate.h/.c      # 影像旋轉＋ROI 矩形座標變換（v2.8）
 │   ├── compare.h / compare_image.c / compare_core.c
@@ -72,10 +77,11 @@ roi-analyzer/
     ├── 01_histogram_arch.md   # Histogram 模組設計書（v1.3：RGB 統計列 R/G/B/Y 四列）
     ├── compareformV1V2_architecture_.md  # CompareForm V1／V2 設計書（v2.7 定稿＋§14 增補）
     ├── rotate_v2_8_architecture.md  # v2.8 定稿：旋轉＋未存檔防護
+    ├── monitor_rename_architecture.md  # v2.9：監控＋更名（含 self-trigger 三道防線）
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 8,900 行 C 程式碼（主程式約 5,200＋比較模組約 3,300＋旋轉／存檔約 340），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
+預估約 10,000 行 C 程式碼（主程式約 5,900＋比較模組約 3,300＋旋轉／存檔約 340＋監控／更名／設定約 1,000），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 
