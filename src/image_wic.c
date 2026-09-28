@@ -108,9 +108,8 @@ int Image_LoadWIC(image_t *img, const char *path)
     img->w = (int)width;
     img->h = (int)height;
     img->pitch = (int)rowbytes;
-    strncpy(img->path, path, MAX_PATH - 1);
-    img->path[MAX_PATH - 1] = '\0';
-    strcpy(img->decoder, "WIC");
+    lstrcpynA(img->path, path, MAX_PATH);
+    lstrcpynA(img->decoder, "WIC", (int)sizeof(img->decoder));
     img->valid = TRUE;
     result = 0;
 

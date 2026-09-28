@@ -26,6 +26,10 @@ add_executable(roi_analyzer
     src/rename.c
     src/monitor.c
     src/metrics.c
+    src/masks.c
+    src/metrics_v2.c
+    src/ranking.c
+    src/views.c
     src/fft.c
     src/report.c
     src/metrics_async.c

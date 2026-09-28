@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v3.0 | 日期：2026-09-28 | 比較視窗 Metrics 指標分析（一期空間域＋二期 FFT／Lab）＋UTF-8 HTML 報告（v2.9 監控併入）
+> 版本：v3.1 | 日期：2026-09-28 | Metric Set v2：遮罩驅動量測（Edge/Flat/Neutral/Tier）＋S/N/C/K 指標＋排名引擎＋3 視圖＋報告升級（v3.0 指標併入）
 
 ## 變更歷史
+
+- **v3.1（2026-09-28）**：Metric Set v2（只做加法，v3.0 API／欄位／流程全保留）。`src/masks.h/.c` 約 380 行：Y 通道 Sobel 梯度（3×3 高斯前處理一次）；Edge（梯度中位數法自動閾值＋排除 ROI 邊界 3px）；Flat（梯度第 30 百分位＋扣除 Edge 膨脹 5px）；Neutral（5×5 平均後 Lab C*<8 且 15<L*<95）；NeutralFlat 交集；ContrastTier（沿梯度法線 ±4px 兩側 L* 中位數差分三級 <10／10–30／>30）；聯合遮罩由參考圖算一次套全組；樣本 <1% 或 <500px 回 NaN＋reason。`src/metrics_v2.h/.c` 約 520 行：S1 Edge 上 median(G/ΔL)；S2 法線剖面 10–90% 中位距離；S3 overshoot%＋undershoot；S4 分級 S1＋TR；S5 參考邊緣各級存活率；N1 Flat 內 σ_Y＋SNR；N2 殘差自相關 FWHM；N3 五段 L* 曲線＋暗部 σ；C1 Flat 內 σ_C；C2 NeutralFlat 內 σ_C＋色斑 FWHM；C3 沿用 gray_cast；K1 改 Lab C* 均值＋P95＋ΔC%（`sat_*` 欄位保留）；K2 C* 加權 Δh_ab（無參考圖 NaN）；舊 Laplacian／Tenengrad／Brenner 欄位保留（legacy，不排名）。`src/ranking.h/.c` 約 190 行：四方向正規化 0–100、relative／absolute、4 profile（balanced／detail／low_light／color）、綜合排名＋`rank_tied` 並列（2.0 分容差；已知缺口：非按指標個別 JND）。`src/views.h/.c` 約 140 行：edge_tier／noise_residual／gamma_boost 256×192 縮圖。`report.c` 擴充約 210 行：排名總表＋熱力表＋手寫 SVG 雷達＋警示區＋legacy 收合＋CSV 匯出，三視圖 Base64 內嵌，串接既有報告流程。詳見 `compare_metrics_architecture.md` §12。
 
 - **v3.0（2026-09-28）**：比較視窗 Metrics 指標分析（`src/metrics.h/.c` 約 600 行：一期空間域 Laplacian／Sobel／Tenengrad／Brenner／8 向對比／雜訊 SNR／亮度四區／飽和度，`metrics_workspace_t` 單趟 3 行快取峰值 <10MB。`src/fft.h/.c` 約 150 行：Radix-2 2D FFT＋PSD 三頻帶。色偏共用 `analyze.c` Lab 不另轉 CbCr。`src/report.h/.c` 約 450 行：單一 HTML＋UTF-8 BOM＋`<meta charset>`＋CP_ACP→UTF-16→UTF-8 兩段轉碼＋Base64 邊緣圖＋`ShellExecuteA` 開瀏覽器。`src/metrics_async.h/.c` 約 200 行：4MP 門檻 `CreateThread`＋`CmpImage_Ref` 保護＋`WM_APP_METRICS_DONE (WM_APP+103)`。`image_wic` 加記憶體 PNG 編碼）。UI：V1／V2 工具列 `Metrics` 鈕（沿用 `Compare_PreTranslate` 命令段）＋`View > Metrics Report for Compare (Ctrl+M)`（IDM 109／110）＋Stage2 開關＋`IDD_METRICS_PROGRESS`（240）進度框。詳見 `compare_metrics_architecture.md`。
 
@@ -53,6 +55,10 @@ roi-analyzer/
 │   │                  # 另提供 Image_Clone（malloc＋memcpy，供比較視窗交付目前影像）
 │   ├── image_wic.c    # WIC 記憶體解碼與 BGRA CopyPixels
 │   ├── metrics.h/.c     # 一期空間域指標引擎（v3.0）
+│   ├── masks.h/.c       # 量測遮罩 Edge/Flat/Neutral/Tier（v3.1）
+│   ├── metrics_v2.h/.c  # Metric Set v2：S1-S5/N1-N3/C1-C2/K1-K2（v3.1）
+│   ├── ranking.h/.c     # 排名引擎：正規化/profile/綜合排名（v3.1）
+│   ├── views.h/.c       # 視覺化縮圖：edge_tier/noise_residual/gamma_boost（v3.1）
 │   ├── fft.h/.c         # 二期 Radix-2 2D FFT＋PSD（v3.0）
 │   ├── report.h/.c      # UTF-8 HTML 報告＋Base64（v3.0）
 │   ├── metrics_async.h/.c # 4MP 背景執行緒封裝（v3.0）
@@ -89,7 +95,7 @@ roi-analyzer/
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 11,500 行 C 程式碼（主程式約 6,100＋比較模組約 3,500＋旋轉／存檔約 340＋監控／更名／設定約 1,000＋指標／FFT／報告約 1,400），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
+預估約 12,900 行 C 程式碼（主程式約 6,100＋比較模組約 3,500＋旋轉／存檔約 340＋監控／更名／設定約 1,000＋指標／FFT／報告約 1,400＋Metric Set v2 約 1,450），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 

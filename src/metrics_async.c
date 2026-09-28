@@ -6,6 +6,8 @@
 
 #include <commctrl.h>
 
+#include "ranking.h"
+
 struct metrics_async_job {
     volatile LONG refs;
     HWND hwnd_notify;
@@ -35,10 +37,20 @@ static void job_unref(metrics_async_job_t *job)
 static DWORD WINAPI metrics_worker(void *parameter)
 {
     metrics_async_job_t *job = (metrics_async_job_t *)parameter;
+    metrics_masks_t reference_masks;
     HRESULT com_result = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     BOOL uninitialize_com = SUCCEEDED(com_result);
+    BOOL have_reference_masks = FALSE;
     int i;
+    memset(&reference_masks, 0, sizeof(reference_masks));
     job->result.success = SUCCEEDED(com_result);
+    if (job->result.success) {
+        have_reference_masks = MetricsMasks_BuildCancelable(
+            &job->images[0]->img, job->roi_rects[0],
+            &job->cancel_requested, &reference_masks);
+        if (!have_reference_masks)
+            job->result.success = FALSE;
+    }
     for (i = 0; job->result.success && i < job->count; i++) {
         metrics_item_result_t *item = &job->result.items[i];
         if (InterlockedCompareExchange(
@@ -47,10 +59,10 @@ static DWORD WINAPI metrics_worker(void *parameter)
             job->result.cancelled = TRUE;
             break;
         }
-        if (!Metrics_AnalyzeROI_Cancelable(&job->images[i]->img,
-                                           job->roi_rects[i],
-                                           job->enable_stage2,
-                                           &job->cancel_requested, item)) {
+        if (!Metrics_AnalyzeROI_CancelableWithReferenceMask(
+                &job->images[i]->img, job->roi_rects[i],
+                job->enable_stage2, &job->cancel_requested,
+                &reference_masks, item)) {
             job->result.success = FALSE;
             job->result.cancelled =
                 InterlockedCompareExchange(
@@ -61,6 +73,14 @@ static DWORD WINAPI metrics_worker(void *parameter)
                    (int)sizeof(item->image_name));
         job->result.count++;
     }
+    if (job->result.success) {
+        Metrics_ApplyReference(job->result.items, job->result.count, 0);
+        MetricsRank_Compute(job->result.items, job->result.count,
+                            METRICS_PROFILE_BALANCED,
+                            METRICS_RANK_ABSOLUTE_DEFAULT);
+    }
+    if (have_reference_masks)
+        MetricsMasks_Free(&reference_masks);
     if (InterlockedCompareExchange(
             (volatile LONG *)&job->cancel_requested, 0, 0)) {
         job->result.success = FALSE;

@@ -9,6 +9,9 @@
 #include "analyze.h"
 #include "image_wic.h"
 #include "report.h"
+#include "masks.h"
+#include "metrics_v2.h"
+#include "views.h"
 
 #define EDGE_PREVIEW_SIZE 512
 #define NOISE_THRESHOLD 5.0
@@ -464,6 +467,7 @@ BOOL Metrics_ComputeFrequencyAndColor(const image_t *img, RECT rc,
 
 static BOOL analyze_roi(const image_t *img, RECT rc, BOOL enable_stage2,
                         volatile BOOL *cancel_requested,
+                        const metrics_masks_t *reference_masks,
                         metrics_item_result_t *out)
 {
     RECT roi;
@@ -480,6 +484,7 @@ static BOOL analyze_roi(const image_t *img, RECT rc, BOOL enable_stage2,
     out->image_h = img->h;
     out->source_rect = roi;
     lstrcpynA(out->image_name, img->path, (int)sizeof(out->image_name));
+    MetricsV2_Init(out);
     if (!compute_spatial(img, roi, &workspace, &out->s1, cancel_requested))
         goto done;
     if (enable_stage2) {
@@ -490,6 +495,36 @@ static BOOL analyze_roi(const image_t *img, RECT rc, BOOL enable_stage2,
             goto done;
         out->has_stage2 = TRUE;
     }
+    free(workspace.fft_buf);
+    workspace.fft_buf = NULL;
+    {
+        metrics_masks_t masks;
+        BOOL mask_ready = reference_masks ?
+            MetricsMasks_UseReference(reference_masks, roi, &masks) :
+            MetricsMasks_BuildCancelable(img, roi, cancel_requested, &masks);
+        if (mask_ready) {
+            if (!MetricsV2_Compute(img, &masks, cancel_requested, out)) {
+                MetricsMasks_Free(&masks);
+                goto done;
+            }
+            if (out->has_stage2 &&
+                !MetricsViews_Build(img, &masks, &out->s2)) {
+                MetricsMasks_Free(&masks);
+                goto done;
+            }
+            MetricsMasks_Free(&masks);
+        } else if (is_cancel_requested(cancel_requested)) {
+            goto done;
+        } else {
+            int metric;
+            out->s1.noise_estimate = NAN;
+            out->s1.snr_db = NAN;
+            for (metric = 0; metric < METRICS_V2_COUNT; metric++)
+                lstrcpynA(out->v2_reason[metric],
+                          "Mask workspace unavailable or ROI exceeds 5.5MP",
+                          METRICS_REASON_LENGTH);
+        }
+    }
     success = TRUE;
 done:
     Metrics_FreeWorkspace(&workspace);
@@ -498,10 +533,152 @@ done:
     return success;
 }
 
+static double metric_minimum_samples(const metrics_item_result_t *item)
+{
+    uint64_t width, height, required;
+    if (!item || item->source_rect.right <= item->source_rect.left ||
+        item->source_rect.bottom <= item->source_rect.top)
+        return 500.0;
+    width = (uint64_t)(item->source_rect.right - item->source_rect.left);
+    height = (uint64_t)(item->source_rect.bottom - item->source_rect.top);
+    required = width * height / 100;
+    return (double)(required < 500 ? 500 : required);
+}
+
+void Metrics_ApplyReference(metrics_item_result_t *items, int count,
+                            int reference_index)
+{
+    int i, tier;
+    BOOL has_reference;
+    double reference_edges[3] = { 0.0, 0.0, 0.0 };
+    double reference_hue_x = 0.0, reference_hue_y = 0.0;
+    double reference_chroma = 0.0;
+    double reference_minimum_samples = 0.0;
+    int reference_count = 0;
+    int chroma_reference_count = 0;
+    if (!items || count <= 0 || reference_index < -1 ||
+        reference_index >= count)
+        return;
+    has_reference = count > 1;
+    if (has_reference && reference_index >= 0) {
+        reference_minimum_samples =
+            metric_minimum_samples(&items[reference_index]);
+        for (tier = 0; tier < 3; tier++)
+            reference_edges[tier] =
+                items[reference_index].v2_edge_count[tier];
+        if (items[reference_index].has_stage2 &&
+            isfinite(items[reference_index].s2.mean_chroma)) {
+            reference_hue_x = items[reference_index].s2.mean_lab_a;
+            reference_hue_y = items[reference_index].s2.mean_lab_b;
+            reference_count = 1;
+            reference_chroma = items[reference_index].s2.mean_chroma;
+            chroma_reference_count = 1;
+        }
+    } else if (has_reference) {
+        for (i = 0; i < count; i++) {
+            reference_minimum_samples += metric_minimum_samples(&items[i]);
+            for (tier = 0; tier < 3; tier++)
+                reference_edges[tier] += items[i].v2_edge_count[tier];
+            if (items[i].has_stage2 &&
+                isfinite(items[i].s2.mean_chroma)) {
+                reference_hue_x += items[i].s2.mean_lab_a;
+                reference_hue_y += items[i].s2.mean_lab_b;
+                reference_count++;
+                reference_chroma += items[i].s2.mean_chroma;
+                chroma_reference_count++;
+            }
+        }
+        for (tier = 0; tier < 3; tier++)
+            reference_edges[tier] /= (double)count;
+        reference_minimum_samples /= (double)count;
+        if (reference_count) {
+            reference_hue_x /= (double)reference_count;
+            reference_hue_y /= (double)reference_count;
+        }
+        if (chroma_reference_count)
+            reference_chroma /= (double)chroma_reference_count;
+    }
+    for (i = 0; i < count; i++) {
+        for (tier = 0; tier < 3; tier++) {
+            int metric = METRIC_S5_LOW_SURVIVAL + tier;
+            double reference_edge_count = reference_edges[tier];
+            double minimum_reference = has_reference ?
+                reference_minimum_samples : 500.0;
+            double minimum_image = metric_minimum_samples(&items[i]);
+            if (!has_reference || reference_edge_count < minimum_reference ||
+                items[i].v2_edge_count[tier] < minimum_image) {
+                items[i].v2[metric] = NAN;
+                if (!has_reference)
+                    lstrcpynA(items[i].v2_reason[metric], "No reference image",
+                              METRICS_REASON_LENGTH);
+                else if (reference_edge_count < minimum_reference)
+                    lstrcpynA(items[i].v2_reason[metric],
+                              "Reference edge sample below 500px/1%",
+                              METRICS_REASON_LENGTH);
+                else
+                    lstrcpynA(items[i].v2_reason[metric],
+                              "Image edge sample below 500px/1%",
+                              METRICS_REASON_LENGTH);
+            } else {
+                items[i].v2[metric] =
+                    items[i].v2_edge_count[tier] * 100.0 /
+                    reference_edge_count;
+                items[i].v2_reason[metric][0] = '\0';
+            }
+        }
+        if (has_reference && items[i].has_stage2 && reference_count > 0 &&
+            isfinite(items[i].s2.mean_chroma)) {
+            double reference_hue = atan2(reference_hue_y, reference_hue_x);
+            double image_hue = atan2(items[i].s2.mean_lab_b,
+                                     items[i].s2.mean_lab_a);
+            double delta = fabs(image_hue - reference_hue) *
+                           (180.0 / 3.14159265358979323846);
+            if (delta > 180.0)
+                delta = 360.0 - delta;
+            items[i].s2.hue_delta = delta;
+            items[i].v2[METRIC_K2_HUE_DELTA] = delta;
+            items[i].v2_reason[METRIC_K2_HUE_DELTA][0] = '\0';
+        } else {
+            items[i].s2.hue_delta = NAN;
+            items[i].v2[METRIC_K2_HUE_DELTA] = NAN;
+            {
+                const char *message = !has_reference ? "No reference image" :
+                    (!items[i].has_stage2 ?
+                     "Stage 2 is disabled for image" :
+                     "Reference Lab samples unavailable");
+                lstrcpynA(items[i].v2_reason[METRIC_K2_HUE_DELTA], message,
+                          METRICS_REASON_LENGTH);
+            }
+        }
+        if (has_reference && items[i].has_stage2 &&
+            chroma_reference_count > 0 && reference_chroma > 1e-9 &&
+            isfinite(items[i].s2.mean_chroma)) {
+            items[i].s2.chroma_delta_percent =
+                (items[i].s2.mean_chroma - reference_chroma) * 100.0 /
+                reference_chroma;
+            items[i].v2[METRIC_K1_CHROMA_DELTA_PERCENT] =
+                items[i].s2.chroma_delta_percent;
+            items[i].v2_reason[METRIC_K1_CHROMA_DELTA_PERCENT][0] = '\0';
+        } else {
+            items[i].s2.chroma_delta_percent = NAN;
+            items[i].v2[METRIC_K1_CHROMA_DELTA_PERCENT] = NAN;
+            {
+                const char *message = !has_reference ? "No reference image" :
+                    (!items[i].has_stage2 ?
+                     "Stage 2 is disabled for image" :
+                     "Reference chroma unavailable");
+                lstrcpynA(
+                    items[i].v2_reason[METRIC_K1_CHROMA_DELTA_PERCENT],
+                    message, METRICS_REASON_LENGTH);
+            }
+        }
+    }
+}
+
 BOOL Metrics_AnalyzeROI(const image_t *img, RECT rc, BOOL enable_stage2,
                         metrics_item_result_t *out)
 {
-    return analyze_roi(img, rc, enable_stage2, NULL, out);
+    return analyze_roi(img, rc, enable_stage2, NULL, NULL, out);
 }
 
 BOOL Metrics_AnalyzeROI_Cancelable(const image_t *img, RECT rc,
@@ -509,7 +686,27 @@ BOOL Metrics_AnalyzeROI_Cancelable(const image_t *img, RECT rc,
                                    volatile BOOL *cancel_requested,
                                    metrics_item_result_t *out)
 {
-    return analyze_roi(img, rc, enable_stage2, cancel_requested, out);
+    return analyze_roi(img, rc, enable_stage2, cancel_requested, NULL, out);
+}
+
+BOOL Metrics_AnalyzeROI_WithReferenceMask(
+    const image_t *img, RECT rc, BOOL enable_stage2,
+    const metrics_masks_t *reference_masks, metrics_item_result_t *out)
+{
+    if (!reference_masks)
+        return FALSE;
+    return analyze_roi(img, rc, enable_stage2, NULL, reference_masks, out);
+}
+
+BOOL Metrics_AnalyzeROI_CancelableWithReferenceMask(
+    const image_t *img, RECT rc, BOOL enable_stage2,
+    volatile BOOL *cancel_requested,
+    const metrics_masks_t *reference_masks, metrics_item_result_t *out)
+{
+    if (!reference_masks)
+        return FALSE;
+    return analyze_roi(img, rc, enable_stage2, cancel_requested,
+                       reference_masks, out);
 }
 
 void Metrics_FreeItemResult(metrics_item_result_t *item)
@@ -519,4 +716,5 @@ void Metrics_FreeItemResult(metrics_item_result_t *item)
     free(item->s2.edge_png_base64);
     item->s2.edge_png_base64 = NULL;
     item->s2.edge_png_base64_len = 0;
+    MetricsViews_Free(&item->s2);
 }

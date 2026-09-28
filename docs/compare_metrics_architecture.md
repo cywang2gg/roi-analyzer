@@ -486,3 +486,25 @@ add_executable(roi_analyzer
 
 ---
 *架構書完畢。遵循「只寫架構書，不寫程式碼，不建置，不 commit」之原則。*
+
+## 12. v3.1 Metric Set v2 實作附註
+
+v3.1 保留 v3.0 的公開函式與既有結構欄位，新增 `metrics_v2`、`masks`、
+`ranking`、`views` 模組與附加結果欄位。遮罩以每像素一個分類 byte 保存，
+ROI 超過 5.5 MP 或遮罩配置失敗時保留舊指標，新增指標以 NaN 和原因文字表示；
+遮罩計算也檢查既有 cancel flag。
+
+- `masks.c` 以 3x3 Gaussian 平滑後的 Sobel 梯度直方圖產生中位數 Edge 門檻與
+  第 30 百分位 Flat 門檻；Edge 排除 ROI 外圍 3px，Flat 排除 Edge 的 11x11
+  鄰域。Neutral 使用 5x5 平均 RGB 轉 Lab，並套用 C*、L* 範圍。比較組只建一次
+  參考遮罩，依目標 ROI 尺寸映射套用至其餘影像。
+- `metrics_v2.c` 追加邊緣增益/剖面、分對比層級、平坦區雜訊、殘差自相關、
+  暗部雜訊、NeutralFlat 色度離散、灰階偏色及 C* 統計；小樣本欄位明確標示 N/A。
+  S5 與 K2 可由指定影像作參考；`reference_index == -1` 時改用整組平均，
+  缺少有效基準時輸出 NaN。比較視窗的既有報告流程以第一張影像作參考。
+- `ranking.c` 提供四種方向正規化、absolute/relative 範圍切換及 balanced、
+  detail、low-light、color profile。既有比較報告使用 balanced profile 與
+  編譯期 `METRICS_RANK_ABSOLUTE_DEFAULT` 預設。
+- `views.c` 產生 edge-tier、noise-residual、gamma-boost PNG；報告將三圖、
+  排名/類別熱力表、手寫 SVG 雷達圖、N/A/越界/JND 警示與 UTF-8 CSV 下載連結
+  內嵌在 HTML。舊指標收合於 Legacy 區塊。

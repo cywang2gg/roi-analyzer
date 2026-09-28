@@ -98,9 +98,8 @@ int Image_Load(image_t *img, const char *path)
     img->w = (int)iw;
     img->h = (int)ih;
     img->pitch = (int)rowbytes;
-    strncpy(img->path, path, MAX_PATH - 1);
-    img->path[MAX_PATH - 1] = '\0';
-    strcpy(img->decoder, "GDI+");
+    lstrcpynA(img->path, path, MAX_PATH);
+    lstrcpynA(img->decoder, "GDI+", (int)sizeof(img->decoder));
     img->valid = TRUE;
     return 0;
 }

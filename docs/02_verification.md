@@ -24,6 +24,8 @@
 | V16 | self-trigger 迴圈抑制（v2.9） | 監控目錄進檔→彈窗更名 `ddd_X` | 只彈一次，不再二次彈窗；`LastRenamePrefix` 不疊加；外部相機 5 秒後進檔正常觸發 |
 | V17 | Metrics 一期指標（v3.0） | V1/V2 開 2 張圖按 Metrics（或 Ctrl+M） | HTML 報告開瀏覽器：Laplacian／Sobel／8 向對比／SNR／亮度四區／飽和度欄位齊全 |
 | V18 | Metrics 二期＋4MP 非同步（v3.0） | Stage2 開啟；4MP 以上大圖按 Metrics | FFT 三頻帶＋Lab 色偏＋邊緣圖 Base64 內嵌；大圖走背景執行緒、UI 不凍結，進度框可取消 |
+| V19 | Metric Set v2 遮罩驅動量測（v3.1） | 同一場景 3 張標準圖（清晰／普通／模糊）跑 Metrics | S1 遞減、S2 遞增、S3 單調；Edge／Flat／Neutral 覆蓋率合理（Flat 未被邊緣污染）；樣本不足項顯示 N/A＋reason，不回 0 |
+| V20 | 排名引擎＋報告升級（v3.1） | 2～4 張圖跑 Metrics，切換 profile | 四方向正規化分數 0–100；類別分＋綜合排名正確；差異 ≤2 分標 `≈` 並列；HTML 含熱力表／SVG 雷達／警示區／legacy 收合／CSV 匯出；3 視圖縮圖內嵌 |
 
 ## 2. 测试图生成(Python 参考实现)
 

@@ -6,6 +6,36 @@
 
 #include "fft.h"
 #include "image.h"
+#include "masks.h"
+
+#define METRICS_V2_COUNT 23
+#define METRICS_REASON_LENGTH 48
+
+typedef enum {
+    METRIC_S1_EDGE_GAIN = 0,
+    METRIC_S2_EDGE_WIDTH,
+    METRIC_S3_OVERSHOOT,
+    METRIC_S3_UNDERSHOOT,
+    METRIC_S4_LOW_GAIN,
+    METRIC_S4_MID_GAIN,
+    METRIC_S4_HIGH_GAIN,
+    METRIC_S4_TIER_RATIO,
+    METRIC_S5_LOW_SURVIVAL,
+    METRIC_S5_MID_SURVIVAL,
+    METRIC_S5_HIGH_SURVIVAL,
+    METRIC_N1_NOISE_SIGMA,
+    METRIC_N1_SNR_DB,
+    METRIC_N2_RESIDUAL_FWHM,
+    METRIC_N3_SHADOW_SIGMA,
+    METRIC_C1_CHROMA_SIGMA,
+    METRIC_C2_CHROMA_SIGMA,
+    METRIC_C2_BLOTCH_FWHM,
+    METRIC_C3_GRAY_CAST,
+    METRIC_K1_CHROMA_MEAN,
+    METRIC_K1_CHROMA_P95,
+    METRIC_K1_CHROMA_DELTA_PERCENT,
+    METRIC_K2_HUE_DELTA
+} metrics_v2_id_t;
 
 #define METRICS_ZONE_SHADOW 0
 #define METRICS_ZONE_LOW    1
@@ -49,6 +79,16 @@ typedef struct {
     double mean_lab_l;
     double mean_lab_a;
     double mean_lab_b;
+    double mean_chroma;
+    double chroma_p95;
+    double chroma_delta_percent;
+    double hue_delta;
+    double noise_residual_fwhm;
+    double chroma_blotch_fwhm;
+    double gamma_l[5];
+    char gamma_reason[5][METRICS_REASON_LENGTH];
+    char *v2_png_base64[3];
+    size_t v2_png_base64_len[3];
 } metrics_stage2_t;
 
 typedef struct {
@@ -59,6 +99,13 @@ typedef struct {
     BOOL has_stage2;
     metrics_stage1_t s1;
     metrics_stage2_t s2;
+    double v2[METRICS_V2_COUNT];
+    char v2_reason[METRICS_V2_COUNT][METRICS_REASON_LENGTH];
+    double rank_score;
+    double rank_category[4];
+    int rank_order;
+    BOOL rank_tied;
+    double v2_edge_count[3];
 } metrics_item_result_t;
 
 typedef struct {
@@ -81,6 +128,16 @@ BOOL Metrics_AnalyzeROI_Cancelable(const image_t *img, RECT rc,
                                    BOOL enable_stage2,
                                    volatile BOOL *cancel_requested,
                                    metrics_item_result_t *out);
+BOOL Metrics_AnalyzeROI_WithReferenceMask(
+    const image_t *img, RECT rc, BOOL enable_stage2,
+    const metrics_masks_t *reference_masks, metrics_item_result_t *out);
+BOOL Metrics_AnalyzeROI_CancelableWithReferenceMask(
+    const image_t *img, RECT rc, BOOL enable_stage2,
+    volatile BOOL *cancel_requested,
+    const metrics_masks_t *reference_masks, metrics_item_result_t *out);
 void Metrics_FreeItemResult(metrics_item_result_t *item);
+/* reference_index == -1 uses the result-set average as the baseline. */
+void Metrics_ApplyReference(metrics_item_result_t *items, int count,
+                            int reference_index);
 
 #endif

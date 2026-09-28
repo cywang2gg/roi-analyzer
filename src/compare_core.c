@@ -10,6 +10,7 @@
 
 #include "metrics_async.h"
 #include "report.h"
+#include "ranking.h"
 
 static HWND s_windows[CMP_MAX_WINDOWS];
 static int s_window_count;
@@ -286,21 +287,37 @@ BOOL Compare_RunMetrics(HWND hwnd, cmp_image_t *const *images,
     }
     memset(items, 0, sizeof(items));
     previous_cursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
-    for (i = 0; i < count; i++) {
-        if (!Metrics_AnalyzeROI(&images[i]->img, roi_rects[i],
-                               s_metrics_stage2, &items[i])) {
-            int j;
-            for (j = 0; j <= i; j++)
-                Metrics_FreeItemResult(&items[j]);
+    {
+        metrics_masks_t reference_masks;
+        if (!MetricsMasks_Build(&images[0]->img, roi_rects[0],
+                                &reference_masks)) {
             SetCursor(previous_cursor);
-            MessageBoxA(hwnd, "Metrics analysis failed.", "Metrics Report",
-                        MB_OK | MB_ICONERROR);
+            MessageBoxA(hwnd, "Could not build reference metric masks.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
             return FALSE;
         }
-        lstrcpynA(items[i].image_name, images[i]->name,
-                   (int)sizeof(items[i].image_name));
+        for (i = 0; i < count; i++) {
+            if (!Metrics_AnalyzeROI_WithReferenceMask(
+                    &images[i]->img, roi_rects[i], s_metrics_stage2,
+                    &reference_masks, &items[i])) {
+                int j;
+                for (j = 0; j <= i; j++)
+                    Metrics_FreeItemResult(&items[j]);
+                MetricsMasks_Free(&reference_masks);
+                SetCursor(previous_cursor);
+                MessageBoxA(hwnd, "Metrics analysis failed.",
+                            "Metrics Report", MB_OK | MB_ICONERROR);
+                return FALSE;
+            }
+            lstrcpynA(items[i].image_name, images[i]->name,
+                      (int)sizeof(items[i].image_name));
+        }
+        MetricsMasks_Free(&reference_masks);
     }
     SetCursor(previous_cursor);
+    Metrics_ApplyReference(items, count, 0);
+    MetricsRank_Compute(items, count, METRICS_PROFILE_BALANCED,
+                        METRICS_RANK_ABSOLUTE_DEFAULT);
     {
         BOOL success = Report_GenerateAndOpen(
             items, count, "ROI Comparison Metrics", NULL);
