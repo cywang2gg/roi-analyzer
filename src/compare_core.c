@@ -1,5 +1,6 @@
 #include "compare.h"
 
+#include <stdint.h>
 #include <limits.h>
 #include <math.h>
 #include <shlwapi.h>
@@ -7,8 +8,12 @@
 #include <string.h>
 #include <wchar.h>
 
+#include "metrics_async.h"
+#include "report.h"
+
 static HWND s_windows[CMP_MAX_WINDOWS];
 static int s_window_count;
+static BOOL s_metrics_stage2 = TRUE;
 static HFONT s_font;
 static const wchar_t (*s_drop_sort_paths)[MAX_PATH];
 
@@ -218,6 +223,129 @@ BOOL Compare_PreTranslate(MSG *msg)
         if (s_windows[i] == root)
             return SendMessageA(root, CMPM_KEY, msg->wParam,
                                 (LPARAM)msg->hwnd) != 0;
+    }
+    return FALSE;
+}
+
+BOOL Compare_MetricsStage2Enabled(void)
+{
+    return s_metrics_stage2;
+}
+
+void Compare_SetMetricsStage2Enabled(BOOL enabled)
+{
+    s_metrics_stage2 = enabled != FALSE;
+}
+
+BOOL Compare_RunMetrics(HWND hwnd, cmp_image_t *const *images,
+                        const RECT *roi_rects, int count,
+                        metrics_async_job_t **async_job)
+{
+    metrics_item_result_t items[CMP_MAX_CELLS];
+    BOOL large = FALSE;
+    int i;
+    HCURSOR previous_cursor;
+    if (async_job)
+        *async_job = NULL;
+    if (!hwnd || !images || !roi_rects || count <= 0 ||
+        count > CMP_MAX_CELLS) {
+        if (hwnd)
+            MessageBoxA(hwnd, "The visible image regions are not valid.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    for (i = 0; i < count; i++) {
+        int64_t width = (int64_t)roi_rects[i].right - roi_rects[i].left;
+        int64_t height = (int64_t)roi_rects[i].bottom - roi_rects[i].top;
+        if (!images[i] || !images[i]->img.valid || !images[i]->img.px ||
+            width <= 0 || height <= 0) {
+            MessageBoxA(hwnd, "The visible image regions are not valid.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+        if ((uint64_t)width * (uint64_t)height >=
+            (uint64_t)METRICS_ASYNC_THRESHOLD_PX)
+            large = TRUE;
+    }
+    if (large) {
+        metrics_async_job_t *job;
+        if (!async_job) {
+            MessageBoxA(hwnd, "Could not start background metrics analysis.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+        job = Metrics_StartAsync(hwnd, WM_APP_METRICS_DONE, images,
+                                 roi_rects, count, s_metrics_stage2);
+        if (!job) {
+            MessageBoxA(hwnd, "Could not start background metrics analysis.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+        *async_job = job;
+        return TRUE;
+    }
+    memset(items, 0, sizeof(items));
+    previous_cursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
+    for (i = 0; i < count; i++) {
+        if (!Metrics_AnalyzeROI(&images[i]->img, roi_rects[i],
+                               s_metrics_stage2, &items[i])) {
+            int j;
+            for (j = 0; j <= i; j++)
+                Metrics_FreeItemResult(&items[j]);
+            SetCursor(previous_cursor);
+            MessageBoxA(hwnd, "Metrics analysis failed.", "Metrics Report",
+                        MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+        lstrcpynA(items[i].image_name, images[i]->name,
+                   (int)sizeof(items[i].image_name));
+    }
+    SetCursor(previous_cursor);
+    {
+        BOOL success = Report_GenerateAndOpen(
+            items, count, "ROI Comparison Metrics", NULL);
+        for (i = 0; i < count; i++)
+            Metrics_FreeItemResult(&items[i]);
+        return success;
+    }
+}
+
+BOOL Compare_CompleteMetrics(metrics_async_job_t *job, BOOL *cancelled)
+{
+    const metrics_async_result_t *result = Metrics_AsyncResult(job);
+    if (cancelled)
+        *cancelled = result ? result->cancelled : FALSE;
+    if (result && result->success && result->count > 0) {
+        if (Report_GenerateAndOpen(result->items, result->count,
+                                   "ROI Comparison Metrics", NULL))
+            return TRUE;
+        return FALSE;
+    }
+    if (result && !result->cancelled)
+        MessageBoxA(NULL, "Metrics analysis failed.", "Metrics Report",
+                    MB_OK | MB_ICONERROR);
+    return result && result->cancelled;
+}
+
+BOOL Compare_TriggerMetrics(void)
+{
+    HWND foreground = GetAncestor(GetForegroundWindow(), GA_ROOT);
+    int i;
+    for (i = s_window_count - 1; i >= 0; i--) {
+        HWND target = s_windows[i];
+        if (!IsWindow(target))
+            continue;
+        if (target == foreground) {
+            SendMessageA(target, CMPM_METRICS, 0, 0);
+            return TRUE;
+        }
+    }
+    for (i = s_window_count - 1; i >= 0; i--) {
+        HWND target = s_windows[i];
+        if (IsWindow(target)) {
+            SendMessageA(target, CMPM_METRICS, 0, 0);
+            return TRUE;
+        }
     }
     return FALSE;
 }

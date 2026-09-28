@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "metrics_async.h"
+
 #define V2_TOP_H       76
 #define V2_GROUP_H     64
 #define V2_BOTTOM_H     28
@@ -21,6 +23,7 @@
 #define V2_ID_RESET    4208
 #define V2_ID_SNAPSHOT 4209
 #define V2_ID_INFO     4210
+#define V2_ID_METRICS  CMP_ID_METRICS
 
 enum { V2_DRAG_NONE = 0, V2_DRAG_SPLIT, V2_DRAG_PAN };
 
@@ -38,9 +41,12 @@ typedef struct {
     HWND split_button;
     HWND reset_button;
     HWND snapshot_button;
+    HWND metrics_button;
     HWND info_bar;
+    HWND progress;
     HWND tooltip;
     cmp_image_t *image[2];
+    metrics_async_job_t *metrics_job;
     cmp_view_t view[2];
     BOOL swapped;
     BOOL split_mode;
@@ -67,6 +73,7 @@ static const char V2_CLASS[] = "RoiCmpV2";
 static const char V2_OVERLAY_CLASS[] = "RoiCmpOverlay";
 
 static void v2_snapshot(cmp_v2_t *state, BOOL copy_only);
+static BOOL v2_run_metrics(cmp_v2_t *state);
 
 static double v2_clamp(double value, double minimum, double maximum)
 {
@@ -105,12 +112,87 @@ static void v2_release(cmp_v2_t *state)
 {
     if (!state)
         return;
+    if (state->metrics_job) {
+        Metrics_CancelAsync(state->metrics_job);
+        Metrics_ReleaseAsync(state->metrics_job);
+        state->metrics_job = NULL;
+    }
+    Metrics_CloseProgress(state->progress);
+    state->progress = NULL;
     CmpReg_Remove(state->hwnd);
     state->registered = FALSE;
     v2_free_backbuffer(state);
     CmpImage_Unref(state->image[0]);
     CmpImage_Unref(state->image[1]);
     state->image[0] = state->image[1] = NULL;
+}
+
+static BOOL v2_visible_roi(cmp_v2_t *state, int side, RECT *roi)
+{
+    RECT client, visible, clip;
+    double x0, y0, x1, y1;
+    int index = v2_image_index(state, side);
+    int split;
+    cmp_image_t *image = state->image[index];
+    if (!GetClientRect(state->overlay, &client) ||
+        !CmpView_VisibleRect(&state->view[index], client.right,
+                             client.bottom, image->img.w, image->img.h,
+                             &visible))
+        return FALSE;
+    split = (int)floor(state->split_fraction * client.right + 0.5);
+    if (split < 0) split = 0;
+    if (split > client.right) split = client.right;
+    clip.left = side == 0 ? 0 : split;
+    clip.right = side == 0 ? split : client.right;
+    clip.top = 0;
+    clip.bottom = client.bottom;
+    if (visible.left < clip.left) visible.left = clip.left;
+    if (visible.right > clip.right) visible.right = clip.right;
+    if (visible.right <= visible.left || visible.bottom <= visible.top)
+        return FALSE;
+    CmpView_ScreenToImage(&state->view[index], client.right, client.bottom,
+                          visible.left, visible.top, &x0, &y0);
+    CmpView_ScreenToImage(&state->view[index], client.right, client.bottom,
+                          visible.right, visible.bottom, &x1, &y1);
+    roi->left = (LONG)floor(x0);
+    roi->top = (LONG)floor(y0);
+    roi->right = (LONG)ceil(x1);
+    roi->bottom = (LONG)ceil(y1);
+    if (roi->left < 0) roi->left = 0;
+    if (roi->top < 0) roi->top = 0;
+    if (roi->right > image->img.w) roi->right = image->img.w;
+    if (roi->bottom > image->img.h) roi->bottom = image->img.h;
+    return roi->right > roi->left && roi->bottom > roi->top;
+}
+
+static BOOL v2_run_metrics(cmp_v2_t *state)
+{
+    cmp_image_t *images[2];
+    RECT rois[2];
+    metrics_async_job_t *job = NULL;
+    int side;
+    if (!state || state->metrics_job)
+        return FALSE;
+    for (side = 0; side < 2; side++) {
+        int index = v2_image_index(state, side);
+        images[side] = state->image[index];
+        if (!v2_visible_roi(state, side, &rois[side])) {
+            MessageBoxA(state->hwnd, "No visible image region is available.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+    }
+    if (!Compare_RunMetrics(state->hwnd, images, rois, 2, &job))
+        return FALSE;
+    if (job) {
+        state->metrics_job = job;
+        EnableWindow(state->metrics_button, FALSE);
+        SetWindowTextA(state->metrics_button, "Analyzing...");
+        state->progress = Metrics_ShowProgress(state->hwnd);
+        if (!state->progress)
+            OutputDebugStringA("ROI Analyzer: could not create metrics progress dialog.\n");
+    }
+    return TRUE;
 }
 
 static void v2_sync_controls(cmp_v2_t *state)
@@ -570,11 +652,13 @@ static void v2_layout(cmp_v2_t *state)
                button_w, 22, TRUE);
     MoveWindow(state->reset_button, gx2 + 18 + button_w * 2, 20,
                button_w, 22, TRUE);
-    lower_w = (act_w - 20) / 2;
+    lower_w = (act_w - 24) / 3;
     if (lower_w < 1)
         lower_w = 1;
     MoveWindow(state->snapshot_button, gx2 + 6, 44, lower_w, 18, TRUE);
-    MoveWindow(state->info_bar, gx2 + 10 + lower_w, 44,
+    MoveWindow(state->info_bar, gx2 + 12 + lower_w, 44,
+               lower_w, 18, TRUE);
+    MoveWindow(state->metrics_button, gx2 + 18 + lower_w * 2, 44,
                lower_w, 18, TRUE);
 }
 
@@ -791,6 +875,9 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         state->snapshot_button = CreateWindowExA(0, "BUTTON", "Snapshot",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 770, 43, 78, 20,
             hwnd, (HMENU)V2_ID_SNAPSHOT, instance, NULL);
+        state->metrics_button = CreateWindowExA(0, "BUTTON", "Metrics",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 938, 43, 90, 20,
+            hwnd, (HMENU)V2_ID_METRICS, instance, NULL);
         state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 850, 43, 86, 20,
             hwnd, (HMENU)V2_ID_INFO, instance, NULL);
@@ -806,7 +893,8 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             !state->sync || !state->pan_left || !state->pan_right ||
             !state->swap_button || !state->split_button ||
             !state->reset_button || !state->snapshot_button ||
-            !state->info_bar || !state->overlay || !state->status)
+            !state->metrics_button || !state->info_bar ||
+            !state->overlay || !state->status)
             return -1;
         if (!v2_create_tooltip(state))
             return -1;
@@ -834,6 +922,8 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         SendMessageA(state->reset_button, WM_SETFONT,
                      (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->snapshot_button, WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->metrics_button, WM_SETFONT,
                      (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->info_bar, WM_SETFONT,
                      (WPARAM)Compare_Font(), TRUE);
@@ -891,6 +981,9 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             case V2_ID_SNAPSHOT:
                 v2_snapshot(state, FALSE);
                 break;
+            case V2_ID_METRICS:
+                v2_run_metrics(state);
+                break;
             case V2_ID_INFO:
                 state->show_info =
                     SendMessageA(state->info_bar, BM_GETCHECK, 0, 0) ==
@@ -929,6 +1022,10 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         {
         BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (wparam == 'M' && ctrl) {
+            v2_run_metrics(state);
+            return 1;
+        }
         if ((HWND)GetFocus() == state->track[0] ||
             (HWND)GetFocus() == state->track[1]) {
             if (wparam == VK_LEFT || wparam == VK_RIGHT || wparam == VK_HOME ||
@@ -989,6 +1086,21 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         }
         return 0;
         }
+    case CMPM_METRICS:
+        return state ? v2_run_metrics(state) : FALSE;
+    case WM_APP_METRICS_DONE:
+        if (state && state->metrics_job == (metrics_async_job_t *)wparam) {
+            Metrics_CloseProgress(state->progress);
+            state->progress = NULL;
+            Compare_CompleteMetrics(state->metrics_job, NULL);
+            Metrics_ReleaseAsync(state->metrics_job);
+            state->metrics_job = NULL;
+            EnableWindow(state->metrics_button, TRUE);
+            SetWindowTextA(state->metrics_button, "Metrics");
+            SetFocus(state->overlay);
+            return 0;
+        }
+        return 0;
     case WM_DESTROY:
         if (state) {
             if (state->tooltip) {

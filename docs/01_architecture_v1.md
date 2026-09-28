@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.9 | 日期：2026-09-28 | 資料夾監控（ReadDirectoryChangesW）＋新檔提示彈窗＋更名（F2）＋INI 持久化＋self-trigger 三道防線（v2.8 旋轉併入）
+> 版本：v3.0 | 日期：2026-09-28 | 比較視窗 Metrics 指標分析（一期空間域＋二期 FFT／Lab）＋UTF-8 HTML 報告（v2.9 監控併入）
 
 ## 變更歷史
+
+- **v3.0（2026-09-28）**：比較視窗 Metrics 指標分析（`src/metrics.h/.c` 約 600 行：一期空間域 Laplacian／Sobel／Tenengrad／Brenner／8 向對比／雜訊 SNR／亮度四區／飽和度，`metrics_workspace_t` 單趟 3 行快取峰值 <10MB。`src/fft.h/.c` 約 150 行：Radix-2 2D FFT＋PSD 三頻帶。色偏共用 `analyze.c` Lab 不另轉 CbCr。`src/report.h/.c` 約 450 行：單一 HTML＋UTF-8 BOM＋`<meta charset>`＋CP_ACP→UTF-16→UTF-8 兩段轉碼＋Base64 邊緣圖＋`ShellExecuteA` 開瀏覽器。`src/metrics_async.h/.c` 約 200 行：4MP 門檻 `CreateThread`＋`CmpImage_Ref` 保護＋`WM_APP_METRICS_DONE (WM_APP+103)`。`image_wic` 加記憶體 PNG 編碼）。UI：V1／V2 工具列 `Metrics` 鈕（沿用 `Compare_PreTranslate` 命令段）＋`View > Metrics Report for Compare (Ctrl+M)`（IDM 109／110）＋Stage2 開關＋`IDD_METRICS_PROGRESS`（240）進度框。詳見 `compare_metrics_architecture.md`。
 
 - **v2.9（2026-09-28）**：資料夾監控（`src/monitor.h/.c` 約 600 行：`ReadDirectoryChangesW`＋Overlapped＋背景 worker＋`WaitForMultipleObjects` 稠密壓縮；寫入完成等待限背景執行緒 `Sleep(500)`＋`File_WaitForWriteComplete`；副檔名白名單 png/jpg/jpeg/bmp）。新檔提示彈窗（`IDD_NEW_FILE_PROMPT`：WIC 唯讀縮圖＋檔名輸入＋僅更名／更名並開啟／加入比較／立即比較／取消；單一檢查點原則，不做前置 `ConfirmDiscard`；比較分支 `Unref`；無主圖時比較按鈕禁用）。更名（`src/rename.h/.c` 約 300 行：`ExtractPrefix`＋`is_reserved_base`＋檔名校驗 228＋`MoveFileExA` 覆寫前 `.bak`／`_conflict_N` 備份＋關聯 log 連動搬移失敗只警告）。設定持久化（`src/settings.h/.c` 約 110 行：exe 同目錄 `roi_analyzer.ini`，Monitor Path0-2/Active0-2＋Rename LastRenamePrefix）。`File > Rename File... (F2)`＋`Folder Monitor Settings...`；IDM 107/108、IDD 210/220/230；F2 進加速鍵表＋灰化陣列。self-trigger 迴圈抑制三道防線（事前登記＋worker 發送前二次檢查＋UI `Monitor_IsSelfRename` 終端攔截；ring 16＋SRWLock＋5 秒窗＋`GetFullPathNameA` 標準化）。詳見 `monitor_rename_architecture.md`。
 
@@ -50,6 +52,11 @@ roi-analyzer/
 │   ├── image.h/.c     # WIC 優先、GDI+ fallback，解碼為 32 位元 BGRA
 │   │                  # 另提供 Image_Clone（malloc＋memcpy，供比較視窗交付目前影像）
 │   ├── image_wic.c    # WIC 記憶體解碼與 BGRA CopyPixels
+│   ├── metrics.h/.c     # 一期空間域指標引擎（v3.0）
+│   ├── fft.h/.c         # 二期 Radix-2 2D FFT＋PSD（v3.0）
+│   ├── report.h/.c      # UTF-8 HTML 報告＋Base64（v3.0）
+│   ├── metrics_async.h/.c # 4MP 背景執行緒封裝（v3.0）
+│   ├── image_wic.h      # 記憶體 PNG 編碼宣告（v3.0 新增，原僅 .c）
 │   ├── settings.h/.c    # INI 持久化：監控路徑＋前綴記憶（v2.9）
 │   ├── monitor.h/.c     # 資料夾監控 worker＋self-trigger 抑制 ring（v2.9）
 │   ├── rename.h/.c      # 更名核心：校驗＋MoveFileExA＋log 連動（v2.9）
@@ -77,11 +84,12 @@ roi-analyzer/
     ├── 01_histogram_arch.md   # Histogram 模組設計書（v1.3：RGB 統計列 R/G/B/Y 四列）
     ├── compareformV1V2_architecture_.md  # CompareForm V1／V2 設計書（v2.7 定稿＋§14 增補）
     ├── rotate_v2_8_architecture.md  # v2.8 定稿：旋轉＋未存檔防護
+    ├── compare_metrics_architecture.md  # v3.0：比較指標＋FFT＋HTML 報告
     ├── monitor_rename_architecture.md  # v2.9：監控＋更名（含 self-trigger 三道防線）
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 10,000 行 C 程式碼（主程式約 5,900＋比較模組約 3,300＋旋轉／存檔約 340＋監控／更名／設定約 1,000），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
+預估約 11,500 行 C 程式碼（主程式約 6,100＋比較模組約 3,500＋旋轉／存檔約 340＋監控／更名／設定約 1,000＋指標／FFT／報告約 1,400），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 

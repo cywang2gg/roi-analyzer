@@ -31,6 +31,8 @@
 #define IDM_SAVE_IMAGE 106
 #define IDM_RENAME_FILE 107
 #define IDM_MONITOR_SETTINGS 108
+#define IDM_COMPARE_METRICS CMP_ID_METRICS
+#define IDM_METRICS_SETTINGS 110
 #define IDM_DRAG       111
 #define IDM_GRID3      112
 #define IDM_GRID5      113
@@ -163,7 +165,8 @@ static BOOL App_InitCommonControls(void)
 
     ZeroMemory(&icc, sizeof(icc));
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES |
+                ICC_PROGRESS_CLASS;
     if (InitCommonControlsEx(&icc))
         return TRUE;
 
@@ -359,6 +362,9 @@ static void App_UpdateImageMenu(void)
         return;
     for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         EnableMenuItem(menu, commands[i], MF_BYCOMMAND | state);
+    CheckMenuItem(g_menu_view, IDM_METRICS_SETTINGS, MF_BYCOMMAND |
+                  (Compare_MetricsStage2Enabled() ?
+                   MF_CHECKED : MF_UNCHECKED));
 }
 
 static void App_RotateOrthogonal(int steps)
@@ -2223,6 +2229,20 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             App_PerformRename();
         else if (id == IDM_MONITOR_SETTINGS)
             Monitor_ShowSettingsDialog(hwnd);
+        else if (id == IDM_COMPARE_METRICS) {
+            if (!Compare_TriggerMetrics())
+                MessageBoxA(hwnd, "Open a comparison window before requesting "
+                            "a metrics report.", "Metrics Report",
+                            MB_OK | MB_ICONINFORMATION);
+        }
+        else if (id == IDM_METRICS_SETTINGS) {
+            Compare_SetMetricsStage2Enabled(
+                !Compare_MetricsStage2Enabled());
+            CheckMenuItem(g_menu_view, IDM_METRICS_SETTINGS,
+                          MF_BYCOMMAND |
+                          (Compare_MetricsStage2Enabled() ?
+                           MF_CHECKED : MF_UNCHECKED));
+        }
         else if (id == IDM_ROT90)
             App_RotateOrthogonal(1);
         else if (id == IDM_ROT180)
@@ -2416,6 +2436,11 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(view, MF_STRING, IDM_COMPARE_FILES, "Compare Files...\tCtrl+K");
     AppendMenuA(view, MF_STRING, IDM_COMPARE_NEXT,
                 "Compare Current with Next\tK");
+    AppendMenuA(view, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(view, MF_STRING, IDM_COMPARE_METRICS,
+                "Metrics Report for Compare\tCtrl+M");
+    AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_METRICS_SETTINGS,
+                "Stage 2 FFT and Lab Metrics");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "File");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mode, "Mode");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)edit, "Edit");
@@ -2443,6 +2468,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         { FVIRTKEY, 'L', IDM_HIST_LOG },
         { FVIRTKEY | FCONTROL, 'S', IDM_SAVE_IMAGE },
         { FVIRTKEY | FCONTROL, 'K', IDM_COMPARE_FILES },
+        { FVIRTKEY | FCONTROL, 'M', IDM_COMPARE_METRICS },
         { FVIRTKEY, 'K', IDM_COMPARE_NEXT },
         { FVIRTKEY, VK_F2, IDM_RENAME_FILE }
     };

@@ -1,6 +1,7 @@
 #define COBJMACROS
 
 #include "image.h"
+#include "image_wic.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -130,4 +131,121 @@ done:
     if (stream)
         IStream_Release(stream);
     return result;
+}
+
+BOOL Image_EncodePNGMemory(const BYTE *bgra_pixels, int width, int height,
+                           int stride, BYTE **out_png_data,
+                           size_t *out_png_size)
+{
+    IWICImagingFactory *factory = NULL;
+    IStream *stream = NULL;
+    IWICBitmapEncoder *encoder = NULL;
+    IWICBitmapFrameEncode *frame = NULL;
+    IPropertyBag2 *options = NULL;
+    STATSTG stat;
+    BYTE *png_data = NULL;
+    size_t bytes, offset = 0;
+    HRESULT hr;
+    BOOL success = FALSE;
+
+    if (out_png_data)
+        *out_png_data = NULL;
+    if (out_png_size)
+        *out_png_size = 0;
+    if (!bgra_pixels || !out_png_data || !out_png_size ||
+        width <= 0 || height <= 0 || width > INT_MAX / 4 ||
+        stride < width * 4 ||
+        (size_t)stride > SIZE_MAX / (size_t)height)
+        return FALSE;
+    bytes = (size_t)stride * (size_t)height;
+    if (bytes > MAXDWORD)
+        return FALSE;
+    hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL,
+                          CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory,
+                          (void **)&factory);
+    if (FAILED(hr))
+        goto done;
+    hr = CreateStreamOnHGlobal(NULL, TRUE, &stream);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICImagingFactory_CreateEncoder(factory, &GUID_ContainerFormatPng,
+                                          NULL, &encoder);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICBitmapEncoder_Initialize(encoder, stream,
+                                      WICBitmapEncoderNoCache);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICBitmapEncoder_CreateNewFrame(encoder, &frame, &options);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICBitmapFrameEncode_Initialize(frame, options);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICBitmapFrameEncode_SetSize(frame, (UINT)width, (UINT)height);
+    if (FAILED(hr))
+        goto done;
+    {
+        WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+        hr = IWICBitmapFrameEncode_SetPixelFormat(frame, &format);
+        if (FAILED(hr) || !IsEqualGUID(&format, &GUID_WICPixelFormat32bppBGRA))
+            goto done;
+    }
+    hr = IWICBitmapFrameEncode_WritePixels(frame, (UINT)height,
+                                           (UINT)stride, (UINT)bytes,
+                                           (BYTE *)bgra_pixels);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICBitmapFrameEncode_Commit(frame);
+    if (FAILED(hr))
+        goto done;
+    hr = IWICBitmapEncoder_Commit(encoder);
+    if (FAILED(hr))
+        goto done;
+    hr = IStream_Stat(stream, &stat, STATFLAG_NONAME);
+    if (FAILED(hr) || stat.cbSize.QuadPart == 0 ||
+        stat.cbSize.QuadPart > (ULONGLONG)SIZE_MAX)
+        goto done;
+    png_data = (BYTE *)malloc((size_t)stat.cbSize.QuadPart);
+    if (!png_data)
+        goto done;
+    {
+        LARGE_INTEGER origin;
+        origin.QuadPart = 0;
+        hr = IStream_Seek(stream, origin, STREAM_SEEK_SET, NULL);
+    }
+    if (FAILED(hr))
+        goto done;
+    while (offset < (size_t)stat.cbSize.QuadPart) {
+        ULONG chunk = (ULONG)(((size_t)stat.cbSize.QuadPart - offset) > MAXDWORD ?
+                              MAXDWORD : (size_t)stat.cbSize.QuadPart - offset);
+        ULONG read = 0;
+        hr = IStream_Read(stream, png_data + offset, chunk, &read);
+        if (FAILED(hr) || read != chunk)
+            goto done;
+        offset += read;
+    }
+    *out_png_data = png_data;
+    *out_png_size = offset;
+    png_data = NULL;
+    success = TRUE;
+
+done:
+    free(png_data);
+    if (options)
+        IPropertyBag2_Release(options);
+    if (frame)
+        IWICBitmapFrameEncode_Release(frame);
+    if (encoder)
+        IWICBitmapEncoder_Release(encoder);
+    if (stream)
+        IStream_Release(stream);
+    if (factory)
+        IWICImagingFactory_Release(factory);
+    return success;
+}
+
+void Image_FreePNGMemory(BYTE *png_data)
+{
+    free(png_data);
 }

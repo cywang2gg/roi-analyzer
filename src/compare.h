@@ -12,7 +12,11 @@
 #define CMP_MAX_WINDOWS   8
 #define CMP_MAX_LIVE_IMG  8
 #define CMPM_KEY          (WM_APP + 0x40)
+#define CMPM_METRICS      (WM_APP + 0x41)
+#define CMP_ID_METRICS    109
 #define CMP_RENDER_SNAPSHOT 0x01
+
+typedef struct metrics_async_job metrics_async_job_t;
 
 typedef struct cmp_image {
     image_t img;
@@ -122,5 +126,12 @@ BOOL cmp_save_as_dialog(HWND owner, char *path, size_t capacity);
 BOOL CmpReg_Add(HWND hwnd);
 void CmpReg_Remove(HWND hwnd);
 HFONT Compare_Font(void);
+BOOL Compare_RunMetrics(HWND hwnd, cmp_image_t *const *images,
+                        const RECT *roi_rects, int count,
+                        metrics_async_job_t **async_job);
+BOOL Compare_CompleteMetrics(metrics_async_job_t *job, BOOL *cancelled);
+BOOL Compare_TriggerMetrics(void);
+BOOL Compare_MetricsStage2Enabled(void);
+void Compare_SetMetricsStage2Enabled(BOOL enabled);
 
 #endif

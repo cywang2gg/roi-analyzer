@@ -9,11 +9,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "metrics_async.h"
+
 #define V1_TOOLBAR_H 40
 #define V1_ID_LOCK   4101
 #define V1_ID_V2     4102
 #define V1_ID_SNAPSHOT 4103
 #define V1_ID_INFO   4104
+#define V1_ID_METRICS CMP_ID_METRICS
 
 typedef struct {
     cmp_image_t *image;
@@ -30,11 +33,14 @@ typedef struct {
     HWND lock;
     HWND v2;
     HWND snapshot;
+    HWND metrics;
+    HWND progress;
     HWND info_bar;
     HWND message;
     HWND tooltip;
     cmp_cell_t cells[CMP_MAX_CELLS];
     int count;
+    metrics_async_job_t *metrics_job;
     BOOL locked;
     BOOL show_info;
     BOOL need_fit;
@@ -58,6 +64,7 @@ BOOL CompareV2_Register(HINSTANCE instance);
 void Compare_SetFont(HFONT font);
 static void v1_fit_all(cmp_v1_t *state);
 static void v1_snapshot(cmp_v1_t *state, BOOL copy_only);
+static BOOL v1_run_metrics(cmp_v1_t *state);
 
 static cmp_v1_t *v1_state(HWND hwnd)
 {
@@ -83,6 +90,13 @@ static void v1_release(cmp_v1_t *state)
     int i;
     if (!state)
         return;
+    if (state->metrics_job) {
+        Metrics_CancelAsync(state->metrics_job);
+        Metrics_ReleaseAsync(state->metrics_job);
+        state->metrics_job = NULL;
+    }
+    Metrics_CloseProgress(state->progress);
+    state->progress = NULL;
     CmpReg_Remove(state->hwnd);
     state->registered = FALSE;
     v1_free_backbuffer(state);
@@ -91,6 +105,60 @@ static void v1_release(cmp_v1_t *state)
         state->cells[i].image = NULL;
     }
     state->count = 0;
+}
+
+static BOOL v1_visible_roi(const cmp_cell_t *cell, RECT *roi)
+{
+    RECT visible;
+    double x0, y0, x1, y1;
+    int view_w = cell->image_rect.right - cell->image_rect.left;
+    int view_h = cell->image_rect.bottom - cell->image_rect.top;
+    if (!CmpView_VisibleRect(&cell->view, view_w, view_h,
+                             cell->image->img.w, cell->image->img.h,
+                             &visible))
+        return FALSE;
+    CmpView_ScreenToImage(&cell->view, view_w, view_h, visible.left,
+                          visible.top, &x0, &y0);
+    CmpView_ScreenToImage(&cell->view, view_w, view_h, visible.right,
+                          visible.bottom, &x1, &y1);
+    roi->left = (LONG)floor(x0);
+    roi->top = (LONG)floor(y0);
+    roi->right = (LONG)ceil(x1);
+    roi->bottom = (LONG)ceil(y1);
+    if (roi->left < 0) roi->left = 0;
+    if (roi->top < 0) roi->top = 0;
+    if (roi->right > cell->image->img.w) roi->right = cell->image->img.w;
+    if (roi->bottom > cell->image->img.h) roi->bottom = cell->image->img.h;
+    return roi->right > roi->left && roi->bottom > roi->top;
+}
+
+static BOOL v1_run_metrics(cmp_v1_t *state)
+{
+    cmp_image_t *images[CMP_MAX_CELLS];
+    RECT rois[CMP_MAX_CELLS];
+    metrics_async_job_t *job = NULL;
+    int i;
+    if (!state || state->metrics_job)
+        return FALSE;
+    for (i = 0; i < state->count; i++) {
+        images[i] = state->cells[i].image;
+        if (!v1_visible_roi(&state->cells[i], &rois[i])) {
+            MessageBoxA(state->hwnd, "No visible image region is available.",
+                        "Metrics Report", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+    }
+    if (!Compare_RunMetrics(state->hwnd, images, rois, state->count, &job))
+        return FALSE;
+    if (job) {
+        state->metrics_job = job;
+        EnableWindow(state->metrics, FALSE);
+        SetWindowTextA(state->message, "Analyzing visible regions...");
+        state->progress = Metrics_ShowProgress(state->hwnd);
+        if (!state->progress)
+            OutputDebugStringA("ROI Analyzer: could not create metrics progress dialog.\n");
+    }
+    return TRUE;
 }
 
 static void v1_update_message(cmp_v1_t *state)
@@ -876,16 +944,19 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         state->snapshot = CreateWindowExA(0, "BUTTON", "Snapshot",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 126, 7, 82, 24, hwnd,
             (HMENU)V1_ID_SNAPSHOT, instance, NULL);
+        state->metrics = CreateWindowExA(0, "BUTTON", "Metrics Report",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 304, 7, 94, 24, hwnd,
+            (HMENU)V1_ID_METRICS, instance, NULL);
         state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 214, 7, 86, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 402, 7, 86, 24, hwnd,
             (HMENU)V1_ID_INFO, instance, NULL);
         state->message = CreateWindowExA(0, "STATIC", "",
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 306, 9, 560, 22, hwnd,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 494, 9, 560, 22, hwnd,
             NULL, instance, NULL);
         state->grid = CreateWindowExA(0, V1_GRID_CLASS, "",
             WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, V1_TOOLBAR_H, 0, 0,
             hwnd, NULL, instance, state);
-        if (!state->lock || !state->v2 || !state->snapshot ||
+        if (!state->lock || !state->v2 || !state->snapshot || !state->metrics ||
             !state->info_bar || !state->message || !state->grid)
             return -1;
         if (!v1_create_tooltip(state))
@@ -894,6 +965,7 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         SendMessageA(state->lock, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->v2, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->snapshot, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->metrics, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->info_bar, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->message, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->info_bar, BM_SETCHECK, BST_CHECKED, 0);
@@ -935,6 +1007,11 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
             SetFocus(state->grid);
             return 0;
         }
+        if (LOWORD(wparam) == V1_ID_METRICS && HIWORD(wparam) == BN_CLICKED) {
+            v1_run_metrics(state);
+            SetFocus(state->grid);
+            return 0;
+        }
         if (LOWORD(wparam) == V1_ID_INFO && HIWORD(wparam) == BN_CLICKED) {
             state->show_info =
                 SendMessageA(state->info_bar, BM_GETCHECK, 0, 0) ==
@@ -962,6 +1039,10 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         if (wparam == VK_ESCAPE ||
             (wparam == 'W' && ctrl)) {
             DestroyWindow(hwnd);
+            return 1;
+        }
+        if (wparam == 'M' && ctrl) {
+            v1_run_metrics(state);
             return 1;
         }
         if (wparam == 'S' && ctrl && shift) {
@@ -1017,6 +1098,21 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         }
         return 0;
         }
+    case CMPM_METRICS:
+        return state ? v1_run_metrics(state) : FALSE;
+    case WM_APP_METRICS_DONE:
+        if (state && state->metrics_job == (metrics_async_job_t *)wparam) {
+            Metrics_CloseProgress(state->progress);
+            state->progress = NULL;
+            Compare_CompleteMetrics(state->metrics_job, NULL);
+            Metrics_ReleaseAsync(state->metrics_job);
+            state->metrics_job = NULL;
+            EnableWindow(state->metrics, TRUE);
+            v1_update_message(state);
+            SetFocus(state->grid);
+            return 0;
+        }
+        return 0;
     case WM_DESTROY:
         DragAcceptFiles(hwnd, FALSE);
         if (state && state->tooltip) {

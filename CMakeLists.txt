@@ -25,6 +25,10 @@ add_executable(roi_analyzer
     src/settings.c
     src/rename.c
     src/monitor.c
+    src/metrics.c
+    src/fft.c
+    src/report.c
+    src/metrics_async.c
 )
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)
