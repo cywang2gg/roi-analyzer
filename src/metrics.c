@@ -279,8 +279,7 @@ static void set_cast_name(double a, double b, double delta, char *name,
         else
             value = a > 1.8 ? "Magenta" : (a < -1.8 ? "Green" : "None");
     }
-    strncpy(name, value, capacity - 1);
-    name[capacity - 1] = '\0';
+    lstrcpynA(name, value, (int)capacity);
 }
 
 static BOOL compute_frequency_and_color(const image_t *img, RECT rc,
@@ -355,14 +354,13 @@ static BOOL compute_frequency_and_color(const image_t *img, RECT rc,
     if (shadow_n > 0.0) {
         out_s2->shadow_lab_a = shadow_a / shadow_n;
         out_s2->shadow_lab_b = shadow_b / shadow_n;
-        strncpy(out_s2->shadow_defect,
+        lstrcpynA(out_s2->shadow_defect,
                 out_s2->shadow_lab_a > 3.0 && out_s2->shadow_lab_b < -2.0 ?
-                "Purple" : "Normal", sizeof(out_s2->shadow_defect) - 1);
+                "Purple" : "Normal", (int)sizeof(out_s2->shadow_defect));
     } else {
-        strncpy(out_s2->shadow_defect, "N/A",
-                sizeof(out_s2->shadow_defect) - 1);
+        lstrcpynA(out_s2->shadow_defect, "N/A",
+                (int)sizeof(out_s2->shadow_defect));
     }
-    out_s2->shadow_defect[sizeof(out_s2->shadow_defect) - 1] = '\0';
     if (pixel_count > 0.0) {
         float lab_l, lab_a, lab_b;
         rgb_to_lab_f((float)(rgb_r / pixel_count),

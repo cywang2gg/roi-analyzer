@@ -377,7 +377,7 @@ BOOL Report_GenerateAndOpen(const metrics_item_result_t *items, int count,
                             const char *title, const char *out_html_path)
 {
     char path[MAX_PATH];
-    char temp_path[MAX_PATH];
+    char tmp_file[MAX_PATH];
     BOOL generated = FALSE;
     HINSTANCE result;
     if (out_html_path && out_html_path[0]) {
@@ -386,25 +386,25 @@ BOOL Report_GenerateAndOpen(const metrics_item_result_t *items, int count,
                         "Metrics Report", MB_OK | MB_ICONERROR);
             return FALSE;
         }
-        strncpy(path, out_html_path, sizeof(path) - 1);
-        path[sizeof(path) - 1] = '\0';
+        lstrcpynA(path, out_html_path, (int)sizeof(path));
         generated = Report_WriteHtmlFile(items, count, title, path);
     } else {
-        DWORD length = GetTempPathA((DWORD)sizeof(temp_path), temp_path);
-        if (!length || length >= sizeof(temp_path) ||
-            !GetTempFileNameA(temp_path, "roi", 0, path)) {
+        DWORD length = GetTempPathA((DWORD)sizeof(path), path);
+        if (!length || length >= sizeof(path) ||
+            !GetTempFileNameA(path, "roi", 0, tmp_file)) {
             MessageBoxA(NULL, "Could not create a temporary report path.",
                         "Metrics Report", MB_OK | MB_ICONERROR);
             return FALSE;
         }
+        lstrcpynA(path, tmp_file, (int)sizeof(path));
         if (!PathRenameExtensionA(path, ".html")) {
-            DeleteFileA(path);
+            DeleteFileA(tmp_file);
             MessageBoxA(NULL, "Could not create a temporary report path.",
                         "Metrics Report", MB_OK | MB_ICONERROR);
             return FALSE;
         }
-        if (!MoveFileA(temp_path, path)) {
-            DeleteFileA(temp_path);
+        if (!MoveFileA(tmp_file, path)) {
+            DeleteFileA(tmp_file);
             MessageBoxA(NULL, "Could not reserve a temporary report file.",
                         "Metrics Report", MB_OK | MB_ICONERROR);
             return FALSE;

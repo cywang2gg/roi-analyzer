@@ -358,8 +358,7 @@ flowchart LR
 typedef struct {
     double *row_buf_y[3];       /* 3 行輪轉亮度快取 */
     int buf_w;
-    complex_t *fft_buf;         /* 512x512 FFT 複數快取 */
-    int fft_size;
+    complex_t *fft_buf;         /* 固定尺寸 FFT 複數快取（尺寸編譯期常數，不經參數傳入） */
 } metrics_workspace_t;
 
 /* 初始化工作區 (預先配置快取，避免重複 malloc) */
@@ -426,14 +425,14 @@ void Image_FreePNGMemory(BYTE *png_data);
 | 類別 | 既有最大/已佔用 ID | 本功能配置 ID | 備註說明 |
 |------|-------------------|--------------|----------|
 | **選單 IDM** | 101~108 (`IDM_MONITOR_SETTINGS` 為 108) | `IDM_COMPARE_METRICS = 109`<br>`IDM_METRICS_SETTINGS = 110` | 避開 101-108，從 109 起編 |
-| **工具列 ID** | 4101~4104 (`V1_ID_INFO` 為 4104) | `V1_ID_METRICS = 4105` | 比較視窗 (V1/V2) 工具列按鈕 |
+| **工具列 ID** | V1: 4101~4104 (`V1_ID_INFO` 為 4104)；V2: 4201~ | 工具列按鈕直接共用 `CMP_ID_METRICS (=109)`：`V1_ID_METRICS`／`V2_ID_METRICS` 皆 `#define` 為 `CMP_ID_METRICS`（實碼 `compare_v1.c:19`、`compare_v2.c:26`），不另佔 41xx／42xx 號段 | 比較視窗 (V1/V2) 工具列按鈕與主選單同 ID，共用命令處理 |
 | **對話框 IDD** | 201, 210, 220, 230 (`IDD_RENAME_INPUT` 為 230) | `IDD_METRICS_PROGRESS = 240`<br>`IDC_METRICS_PBAR = 241` | 避開既有對話框，從 240 起編 |
 | **訊息 WM_APP** | `monitor.h`: `WM_APP + 101`<br>`main.c`: `WM_APP_DRAIN_NEW_FILES (WM_APP + 102)` | **`WM_APP_METRICS_DONE = (WM_APP + 103)`** | **特別注意：`WM_APP + 102` 已被佔用，不可使用！必須順延至 103** |
 
 ### 8.2 選單與快速鍵配置
 
 - **比較視窗 (V1/V2) 工具列**：  
-  在 `Snapshot` 按鈕右側新增 `Metrics` 按鈕（ID 4105），文字標示為 `Metrics Report`。
+  在 `Snapshot` 按鈕右側新增 `Metrics` 按鈕，文字標示為 `Metrics Report`；按鈕 ID 直接共用 `CMP_ID_METRICS (=109)`（`V1_ID_METRICS`／`V2_ID_METRICS` 皆 `#define` 為該值），不另佔號段。
 - **快速鍵**：  
   比較視窗訊息前置處理器（`Compare_PreTranslate`）攔截 `Ctrl+M`：  
   觸發當前可見區域指標分析並開啟報告。
@@ -483,7 +482,7 @@ add_executable(roi_analyzer
 | **T2** | 純 C Radix-2 2D FFT 頻域引擎 | `src/fft.h/.c` | 實作 Cooley-Tukey 1D/2D FFT、2D Hann 窗、徑向 PSD 頻帶能量劃分（Low/Mid/High）及高頻佔比計算。 |
 | **T3** | HTML 報告產生器與轉碼 | `src/report.h/.c`、`src/image_wic.c` | 實作自我包含 HTML 模板、CSS 樣式、CP_ACP 轉 UTF-8 帶 BOM 輸出；呼叫 `Image_EncodePNGMemory` 產生邊緣圖 Base64 並內嵌。 |
 | **T4** | 4MP 執行緒切分與異步任務 | `src/metrics_async.h/.c` | 實作 4MP 門檻判斷、`CreateThread` 背景工作、引用計數保護 (`CmpImage_Ref`)、視窗關閉取消機制與 `WM_APP_METRICS_DONE` (103) 發送。 |
-| **T5** | 比較視窗 UI 與端到端整合 | `src/compare_v1.c`、`src/compare_v2.c`、`src/main.c` | 工具列加入 `Metrics` 按鈕 (4105)、攔截 `Ctrl+M` 快速鍵、主視窗選單與驗收測試 M1-M5 跑通。 |
+| **T5** | 比較視窗 UI 與端到端整合 | `src/compare_v1.c`、`src/compare_v2.c`、`src/main.c` | 工具列加入 `Metrics` 按鈕（共用 `CMP_ID_METRICS`=109，不另佔號段）、攔截 `Ctrl+M` 快速鍵、主視窗選單與驗收測試 M1-M5 跑通。 |
 
 ---
 *架構書完畢。遵循「只寫架構書，不寫程式碼，不建置，不 commit」之原則。*
