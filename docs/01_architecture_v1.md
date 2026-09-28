@@ -1,10 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v2.7 增補（直方圖 v1.3） | 日期：2026-09-27 | 主視窗多檔拖放、比較視窗 Snapshot（存檔＋剪貼簿）、DBCS 路徑修正、直方圖 RGB 統計列加 Y 行
+> 版本：v2.8 | 日期：2026-09-28 | 影像旋轉（90°／180°／270°／任意角度）＋未存檔詢問防護＋WIC PNG 覆寫存檔（v2.7 增補、直方圖 v1.3 併入）
 
 ## 變更歷史
 
-- **v2.7 增補追加（2026-09-27）**：Histogram 面板 RGB 疊合統計區由 3 列改為 4 列（R/G/B/Y 各 Mean/StdDev/Median，Y 與 Grid 表格同源 BT.601；Histogram 架構書升 v1.3）。
+- **v2.8（2026-09-28）**：影像旋轉（`src/rotate.h/.c`：正交無損搬移＋任意角度雙線性插值；ROI inclusive-rect 座標變換，正交直接變換＋重分析，任意角度清空手動框＋格線重建）。未存檔防護（`app_t.is_modified`；`App_ConfirmDiscard()` Yes／No／Cancel；6 攔截點：導覽、開檔、拖放、開比較視窗、新增 `WM_CLOSE`、`IDM_EXIT` 改走 `WM_CLOSE`）。`File > Save Image (Ctrl+S)` 經 `Image_SavePNG()`（WIC PNG 原子覆寫；焦點在比較視窗時 `Ctrl+S` 維持 Snapshot 語義，由 `Compare_PreTranslate`＋C6 guard 天然區隔）。旋轉時 `Compare_CloseAll()`。選單新增頂層 `Image`（旋轉 4 項＋任意角度對話框 `IDD_ROTATE_ANGLE`）；無圖時 5 項灰化；標題列／狀態列 `*` 標記。詳見 `rotate_v2_8_architecture.md`。
 
 - **v2.7 增補（2026-09-27）**：主視窗多檔拖放（`CmpDrop_Collect` 共用收集：W 版路徑→略過目錄→副檔名過濾→自然排序→去重→嚴格 ACP；不按 `Ctrl` 且 ≥2 張時主視窗載入第一張＋V1 開全部，按 `Ctrl` 時含目前影像且主視窗不變）。比較視窗 Snapshot（`compare_snap.c` 約 550 行：`CmpSnap_Begin/Finalize/End`＋WIC PNG 編碼＋`CF_BITMAP` 剪貼簿；按鈕與 `Ctrl+S` 存檔＋複製、`Ctrl+Shift+S` 另存、`Ctrl+C` 只複製；存檔位置為影像所在資料夾，檔名 `snap_<A>_vs_<B>_時間戳`，失敗時開另存對話框）。Snapshot 輸出尺寸改以**螢幕實際佔用像素**（`Snap_PhysicalScale` 動態切換執行緒 DPI 感知量測，維持 manifest DPI-unaware；`(u,v)` 不變、以 `z×scale` 渲染，可見範圍與螢幕相同但無系統點陣放大模糊）。V1／V2 工具列加 `Info bar` 核取方塊。C11：比較模組與 `export` 的路徑拆解改用 shlwapi（DBCS 安全）。詳見 `compareformV1V2_architecture_.md` §14。
 - **v2.7（2026-09-27）**：新增比較視窗 V1（2～4 張並排，Lock 同步）與 V2（兩張疊加分割線、`Swap`、各自倍率、像素讀值、雙擊重設）。影像以參考計數 `cmp_image_t` 共享，目前影像以 `Image_Clone` 記憶體複製交付。詳見 `compareformV1V2_architecture_.md`（定稿 C1～C10）。直方圖命令 ID 移至 161～166；`View` 選單新增 `Compare Files… (Ctrl+K)`／`Compare Current with Next (K)`。
@@ -48,6 +48,8 @@ roi-analyzer/
 │   ├── image.h/.c     # WIC 優先、GDI+ fallback，解碼為 32 位元 BGRA
 │   │                  # 另提供 Image_Clone（malloc＋memcpy，供比較視窗交付目前影像）
 │   ├── image_wic.c    # WIC 記憶體解碼與 BGRA CopyPixels
+│   ├── image_save.h/.c  # WIC PNG 原子覆寫存檔（v2.8 旋轉後存檔）
+│   ├── rotate.h/.c      # 影像旋轉＋ROI 矩形座標變換（v2.8）
 │   ├── compare.h / compare_image.c / compare_core.c
 │   │                  # cmp_image_t 參考計數＋金字塔轉接；縮放／視圖數學／Cmp_Blit／
 │   │                  # 視窗登錄表／Compare_PreTranslate
@@ -62,17 +64,18 @@ roi-analyzer/
 │   ├── table.h/.c     # Grid 表格（ListView report）封裝
 │   ├── export.h/.c    # 記錄檔輸出
 │   ├── app.manifest   # comctl32 v6 manifest（現代控制項樣式）
-│   └── app.rc         # 資源檔：嵌入 manifest
+│   └── app.rc         # 資源檔：嵌入 manifest、旋轉角度對話框（v2.8）
 ├── bin/               # 輸出執行檔
 ├── build/             # CMake 建置目錄（不納入版控）
 └── docs/
     ├── 01_architecture_v1.md  # 本文件
-    ├── 01_histogram_arch.md   # Histogram 模組設計書
-    ├── compareformV1V2_architecture_.md  # CompareForm V1／V2 設計書（v2.7 定稿）
+    ├── 01_histogram_arch.md   # Histogram 模組設計書（v1.3：RGB 統計列 R/G/B/Y 四列）
+    ├── compareformV1V2_architecture_.md  # CompareForm V1／V2 設計書（v2.7 定稿＋§14 增補）
+    ├── rotate_v2_8_architecture.md  # v2.8 定稿：旋轉＋未存檔防護
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 5,700 行 C 程式碼（主程式約 3,500＋比較模組約 2,200），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
+預估約 8,900 行 C 程式碼（主程式約 5,200＋比較模組約 3,300＋旋轉／存檔約 340），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 
