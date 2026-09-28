@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <gdiplus/gdiplus.h>
 #include <limits.h>
+#include <math.h>
 #include <objbase.h>
 #include <shlwapi.h>
 #include <stdio.h>
@@ -15,6 +16,8 @@
 #include "compare.h"
 #include "export.h"
 #include "histpanel.h"
+#include "image_save.h"
+#include "rotate.h"
 #include "table.h"
 
 #define IDM_OPEN       101
@@ -22,10 +25,15 @@
 #define IDM_EXIT       103
 #define IDM_PREVIOUS   104
 #define IDM_NEXT       105
+#define IDM_SAVE_IMAGE 106
 #define IDM_DRAG       111
 #define IDM_GRID3      112
 #define IDM_GRID5      113
 #define IDM_MULTI      114
+#define IDM_ROT90      115
+#define IDM_ROT180     116
+#define IDM_ROT270     117
+#define IDM_ROT_ANY    118
 #define IDM_DELETE     121
 #define IDM_CLEAR      122
 #define IDM_CLEAR_ALL  123
@@ -47,6 +55,8 @@
 #define IDC_MULTI      1005
 #define IDC_TABS       1006
 #define IDC_HISTPANEL  1007
+#define IDD_ROTATE_ANGLE 201
+#define IDC_ROTATE_ANGLE 202
 #define SB_PART_POS    0
 #define SB_PART_MSG    1
 #define SB_PART_MODE   2
@@ -62,6 +72,8 @@ static BOOL g_syncing_table;
 static BOOL g_main_wm_create_started;
 static HMENU g_menu_mode;
 static HMENU g_menu_view;
+static HMENU g_menu_image;
+static BOOL g_discard_approved;
 static hist_channel_t g_hist_channel = HCH_RGB;
 static BOOL g_hist_log;
 static LARGE_INTEGER g_qpc_frequency;
@@ -84,6 +96,11 @@ static void ExportCurrent(void);
 static void ChangeZoom(float factor);
 static void SetHistogramChannel(hist_channel_t channel);
 static void UpdateTitle(void);
+static BOOL App_SaveImage(void);
+static BOOL App_ConfirmDiscard(void);
+static void App_RotateOrthogonal(int steps);
+static void App_RotateArbitrary(double degrees);
+static void App_UpdateImageMenu(void);
 static void App_UpdateTable(void);
 static void CompareFilesDialog(void);
 static void CompareCurrentWithNext(void);
@@ -151,16 +168,18 @@ static void UpdateTitle(void)
     if (g_app.img.valid) {
         if (g_current_exact)
             _snprintf(title, sizeof(title),
-                      "ROI Analyzer - %s %dx%d [%d/%d] [%s] [%s]",
+                      "ROI Analyzer - %s %dx%d [%d/%d] [%s] [%s]%s",
                       image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
                       g_app.file_idx + 1, g_app.files.count,
-                      ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single");
+                      ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single",
+                      g_app.is_modified ? " *" : "");
         else
             _snprintf(title, sizeof(title),
-                      "ROI Analyzer - %s %dx%d [%s/%d] [%s] [%s]",
+                      "ROI Analyzer - %s %dx%d [%s/%d] [%s] [%s]%s",
                       image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
                       dash, g_app.files.count, ROI_ModeLabel(g_app.mode),
-                      g_app.multi ? "Multi" : "Single");
+                      g_app.multi ? "Multi" : "Single",
+                      g_app.is_modified ? " *" : "");
     } else {
         _snprintf(title, sizeof(title), "ROI Analyzer - (open or drop an image) [%s] [%s]",
                   ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single");
@@ -202,9 +221,10 @@ void App_UpdateStatus(void)
                       (unsigned)pixel[2], (unsigned)pixel[1], (unsigned)pixel[0]);
         }
     }
-    _snprintf(mode, sizeof(mode), "ROI:%d %s%s %.0f%%",
+    _snprintf(mode, sizeof(mode), "ROI:%d %s%s %.0f%%%s",
               g_app.rois.count, ROI_ModeLabel(g_app.mode),
-              g_app.multi ? " Multi" : "", g_app.view.zoom * 100.0);
+              g_app.multi ? " Multi" : "", g_app.view.zoom * 100.0,
+              g_app.is_modified ? " *" : "");
     _snprintf(time, sizeof(time), "L%.0f A%.0f H%.0f P%.0f S%.0f D%.0f ms",
               g_load_ms, g_analyze_ms, g_hist_ms, g_app.paint_ms,
               g_show_ms, g_done_ms);
@@ -222,6 +242,220 @@ void App_UpdateStatus(void)
     SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_MODE, (LPARAM)mode);
     App_StatusSetIndex();
     SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_TIME, (LPARAM)time);
+}
+
+static BOOL App_SaveImage(void)
+{
+    if (!g_app.img.valid)
+        return FALSE;
+    if (Image_SavePNG(&g_app.img, g_app.img.path) != 0) {
+        MessageBoxA(g_app.hwnd_main, "Could not save image (PNG encode failed).",
+                    "Save Image", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    g_app.is_modified = FALSE;
+    _snprintf(g_nav_status, sizeof(g_nav_status), "Saved %s",
+              image_basename(g_app.img.path));
+    g_nav_status[sizeof(g_nav_status) - 1] = '\0';
+    UpdateTitle();
+    App_UpdateStatus();
+    return TRUE;
+}
+
+static BOOL App_ConfirmDiscard(void)
+{
+    int result;
+    if (!g_app.is_modified || !g_app.img.valid || g_discard_approved)
+        return TRUE;
+    result = MessageBoxA(g_app.hwnd_main,
+        "Image has been rotated but not saved. Save changes?",
+        "ROI Analyzer", MB_YESNOCANCEL | MB_ICONWARNING);
+    if (result == IDYES)
+        return App_SaveImage();
+    if (result == IDNO) {
+        g_discard_approved = TRUE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static INT_PTR CALLBACK RotateAngleDlgProc(HWND dialog, UINT message,
+                                          WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_INITDIALOG) {
+        SetWindowLongPtrA(dialog, GWLP_USERDATA, (LONG_PTR)lparam);
+        SetDlgItemTextA(dialog, IDC_ROTATE_ANGLE, "0");
+        SetFocus(GetDlgItem(dialog, IDC_ROTATE_ANGLE));
+        return FALSE;
+    }
+    if (message != WM_COMMAND)
+        return FALSE;
+    if (LOWORD(wparam) == IDOK) {
+        BOOL translated = FALSE;
+        UINT value = GetDlgItemInt(dialog, IDC_ROTATE_ANGLE, &translated, TRUE);
+        double *degrees = (double *)GetWindowLongPtrA(dialog, GWLP_USERDATA);
+        if (!translated || (int)value < -360 || (int)value > 360) {
+            MessageBoxA(dialog, "Enter an integer from -360 to 360.",
+                        "Rotate Arbitrary", MB_OK | MB_ICONWARNING);
+            return TRUE;
+        }
+        *degrees = (double)(int)value;
+        EndDialog(dialog, IDOK);
+        return TRUE;
+    }
+    if (LOWORD(wparam) == IDCANCEL) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void App_UpdateImageMenu(void)
+{
+    static const UINT commands[] = {
+        IDM_SAVE_IMAGE, IDM_ROT90, IDM_ROT180, IDM_ROT270, IDM_ROT_ANY
+    };
+    HMENU menu = GetMenu(g_app.hwnd_main);
+    UINT state = g_app.img.valid ? MF_ENABLED : MF_GRAYED;
+    size_t i;
+    if (!menu)
+        return;
+    for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+        EnableMenuItem(menu, commands[i], MF_BYCOMMAND | state);
+}
+
+static void App_RotateOrthogonal(int steps)
+{
+    int old_w, old_h, i, degrees;
+    BOOL rotated;
+    BOOL small_grid = FALSE;
+
+    if (!g_app.img.valid)
+        return;
+    Compare_CloseAll();
+    old_w = g_app.img.w;
+    old_h = g_app.img.h;
+    degrees = steps == 1 ? 90 : (steps == 2 ? 180 : 270);
+    if (steps == 1)
+        rotated = Image_Rotate90(&g_app.img);
+    else if (steps == 2)
+        rotated = Image_Rotate180(&g_app.img);
+    else
+        rotated = Image_Rotate270(&g_app.img);
+    if (!rotated) {
+        MessageBoxA(g_app.hwnd_main, "Could not rotate image (out of memory).",
+                    "Rotate Image", MB_OK | MB_ICONERROR);
+        return;
+    }
+    for (i = 0; i < g_app.rois.count; i++) {
+        RECT *rc = &g_app.rois.items[i].rc;
+        if (degrees == 90)
+            ROI_RotateRect90(rc, old_w, old_h);
+        else if (degrees == 180)
+            ROI_RotateRect180(rc, old_w, old_h);
+        else
+            ROI_RotateRect270(rc, old_w, old_h);
+    }
+    if ((g_app.img.w < 3 || g_app.img.h < 3) &&
+        ROI_SourceCount(&g_app.rois, ROI_SRC_GRID3)) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_GRID3);
+        small_grid = TRUE;
+    }
+    if ((g_app.img.w < 5 || g_app.img.h < 5) &&
+        ROI_SourceCount(&g_app.rois, ROI_SRC_GRID5)) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_GRID5);
+        small_grid = TRUE;
+    }
+    ROI_ReanalyzeAll(&g_app.rois, &g_app.img);
+    if (g_app.drag.dragging) {
+        g_app.drag.dragging = FALSE;
+        ReleaseCapture();
+    }
+    ViewPyr_Free(&g_app.pyramid);
+    g_app.pyramid_attempted = FALSE;
+    g_app.pyramid_pending = FALSE;
+    if (g_app.hwnd_canvas) {
+        RECT canvas;
+        GetClientRect(g_app.hwnd_canvas, &canvas);
+        View_Reset(&g_app.view, &g_app.img, canvas.right, canvas.bottom);
+    } else {
+        View_Reset(&g_app.view, &g_app.img, 0, 0);
+    }
+    g_app.img_gen++;
+    g_app.analysis_stale = TRUE;
+    g_app.is_modified = TRUE;
+    _snprintf(g_nav_status, sizeof(g_nav_status),
+              degrees == 180 ? "Rotated 180 degrees; unsaved" :
+              (degrees == 90 ? "Rotated 90 CW; unsaved" :
+                               "Rotated 270 CW; unsaved"));
+    UpdateTitle();
+    App_RoiChanged();
+    App_UpdateHistogram();
+    if (small_grid)
+        MessageBoxA(g_app.hwnd_main,
+                    "The image is too small for one or more existing grids; those grids were cleared.",
+                    "ROI Analyzer", MB_OK | MB_ICONINFORMATION);
+}
+
+static void App_RotateArbitrary(double degrees)
+{
+    BOOL had_grid3, had_grid5, small_grid = FALSE;
+    if (!g_app.img.valid || !isfinite(degrees) ||
+        fmod(degrees, 360.0) == 0.0)
+        return;
+    Compare_CloseAll();
+    if (!Image_RotateArbitrary(&g_app.img, degrees)) {
+        MessageBoxA(g_app.hwnd_main,
+                    "Could not rotate image (invalid angle or out of memory).",
+                    "Rotate Image", MB_OK | MB_ICONERROR);
+        return;
+    }
+    had_grid3 = ROI_SourceCount(&g_app.rois, ROI_SRC_GRID3) > 0;
+    had_grid5 = ROI_SourceCount(&g_app.rois, ROI_SRC_GRID5) > 0;
+    ROI_ClearSource(&g_app.rois, ROI_SRC_MANUAL);
+    if (had_grid3) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_GRID3);
+        if (g_app.img.w < 3 || g_app.img.h < 3)
+            small_grid = TRUE;
+        else if (!ROI_BuildGrid(&g_app.rois, &g_app.img, 3))
+            MessageBoxA(g_app.hwnd_main, "Could not rebuild the 3x3 ROI grid.",
+                        "ROI Analyzer", MB_OK | MB_ICONERROR);
+    }
+    if (had_grid5) {
+        ROI_ClearSource(&g_app.rois, ROI_SRC_GRID5);
+        if (g_app.img.w < 5 || g_app.img.h < 5)
+            small_grid = TRUE;
+        else if (!ROI_BuildGrid(&g_app.rois, &g_app.img, 5))
+            MessageBoxA(g_app.hwnd_main, "Could not rebuild the 5x5 ROI grid.",
+                        "ROI Analyzer", MB_OK | MB_ICONERROR);
+    }
+    ROI_ReanalyzeAll(&g_app.rois, &g_app.img);
+    if (g_app.drag.dragging) {
+        g_app.drag.dragging = FALSE;
+        ReleaseCapture();
+    }
+    ViewPyr_Free(&g_app.pyramid);
+    g_app.pyramid_attempted = FALSE;
+    g_app.pyramid_pending = FALSE;
+    if (g_app.hwnd_canvas) {
+        RECT canvas;
+        GetClientRect(g_app.hwnd_canvas, &canvas);
+        View_Reset(&g_app.view, &g_app.img, canvas.right, canvas.bottom);
+    } else {
+        View_Reset(&g_app.view, &g_app.img, 0, 0);
+    }
+    g_app.img_gen++;
+    g_app.analysis_stale = TRUE;
+    g_app.is_modified = TRUE;
+    _snprintf(g_nav_status, sizeof(g_nav_status),
+              "Rotated %.0f degrees; unsaved", degrees);
+    UpdateTitle();
+    App_RoiChanged();
+    App_UpdateHistogram();
+    if (small_grid)
+        MessageBoxA(g_app.hwnd_main,
+                    "The image is too small for one or more existing grids; those grids were cleared.",
+                    "ROI Analyzer", MB_OK | MB_ICONINFORMATION);
 }
 
 void App_StatusSetIndex(void)
@@ -382,6 +616,8 @@ void App_Navigate(int direction, BOOL light)
 
     if (direction != -1 && direction != 1)
         return;
+    if (!App_ConfirmDiscard())
+        return;
     if (!g_app.img.valid)
         return;
     g_browsing = FALSE;
@@ -467,6 +703,7 @@ void App_Navigate(int direction, BOOL light)
     g_app.pyramid_pending = FALSE;
     g_app.img = loaded;
     Image_Free(&previous);
+    g_app.is_modified = FALSE;
     g_app.img_gen++;
     g_app.file_idx = target;
     g_current_exact = TRUE;
@@ -768,6 +1005,8 @@ static BOOL OpenImageFile(const char *path)
 {
     image_t loaded;
     memset(&loaded, 0, sizeof(loaded));
+    if (!App_ConfirmDiscard())
+        return FALSE;
     if (!path || !path[0])
         return FALSE;
     App_FlushPending();
@@ -778,6 +1017,7 @@ static BOOL OpenImageFile(const char *path)
     }
     Image_Free(&g_app.img);
     g_app.img = loaded;
+    g_app.is_modified = FALSE;
     ROI_Clear(&g_app.rois, &g_app.drag);
     g_app.img_gen++;
     g_app.analysis_stale = FALSE;
@@ -842,6 +1082,8 @@ static BOOL App_CompareOpenPaths(char paths[CMP_MAX_CELLS][MAX_PATH],
     HCURSOR old_cursor;
     BOOL opened = FALSE;
 
+    if (!App_ConfirmDiscard())
+        return FALSE;
     if (!paths || path_count <= 0)
         return FALSE;
     App_FlushPending();
@@ -938,6 +1180,10 @@ static void App_OnDropFiles(HDROP drop)
     cmp_drop_stats_t stats;
     BOOL include_current = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     BOOL collected;
+    if (!App_ConfirmDiscard()) {
+        DragFinish(drop);
+        return;
+    }
     ZeroMemory(paths, sizeof(paths));
     collected = CmpDrop_Collect(drop, paths, CMP_MAX_CELLS, &stats);
     DragFinish(drop);
@@ -1359,6 +1605,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         if (LOWORD(wparam) == WA_INACTIVE)
             App_FlushPending();
         break;
+    case WM_INITMENUPOPUP:
+        App_UpdateImageMenu();
+        return 0;
     case WM_COMMAND: {
         int id = LOWORD(wparam);
         App_FlushPending();
@@ -1367,7 +1616,23 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         else if (id == IDM_EXPORT || id == IDC_EXPORT)
             ExportCurrent();
         else if (id == IDM_EXIT)
-            DestroyWindow(hwnd);
+            SendMessageA(hwnd, WM_CLOSE, 0, 0);
+        else if (id == IDM_SAVE_IMAGE)
+            App_SaveImage();
+        else if (id == IDM_ROT90)
+            App_RotateOrthogonal(1);
+        else if (id == IDM_ROT180)
+            App_RotateOrthogonal(2);
+        else if (id == IDM_ROT270)
+            App_RotateOrthogonal(3);
+        else if (id == IDM_ROT_ANY) {
+            double degrees = 0.0;
+            if (DialogBoxParamA(GetModuleHandleA(NULL),
+                                MAKEINTRESOURCEA(IDD_ROTATE_ANGLE), hwnd,
+                                RotateAngleDlgProc, (LPARAM)&degrees) == IDOK &&
+                fmod(degrees, 360.0) != 0.0)
+                App_RotateArbitrary(degrees);
+        }
         else if (id == IDM_PREVIOUS)
             App_Navigate(-1, FALSE);
         else if (id == IDM_NEXT)
@@ -1456,6 +1721,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         App_OnDropFiles((HDROP)wparam);
         return 0;
     }
+    case WM_CLOSE:
+        if (!App_ConfirmDiscard())
+            return 0;
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
         Compare_CloseAll();
         DragAcceptFiles(hwnd, FALSE);
@@ -1471,10 +1741,12 @@ static HMENU CreateMainMenu(void)
     HMENU file = CreatePopupMenu();
     HMENU mode = CreatePopupMenu();
     HMENU edit = CreatePopupMenu();
+    HMENU image = CreatePopupMenu();
     HMENU log = CreatePopupMenu();
     HMENU view = CreatePopupMenu();
 
     AppendMenuA(file, MF_STRING, IDM_OPEN, "Open...\tO");
+    AppendMenuA(file, MF_STRING, IDM_SAVE_IMAGE, "Save Image\tCtrl+S");
     AppendMenuA(file, MF_STRING, IDM_PREVIOUS, "Previous Image");
     AppendMenuA(file, MF_STRING, IDM_NEXT, "Next Image");
     AppendMenuA(file, MF_STRING, IDM_EXPORT, "Export Log\tCtrl+E");
@@ -1488,6 +1760,10 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(edit, MF_STRING, IDM_DELETE, "Delete Selected ROI\tDel");
     AppendMenuA(edit, MF_STRING, IDM_CLEAR, "Clear Current Tab ROI\tC");
     AppendMenuA(edit, MF_STRING, IDM_CLEAR_ALL, "Clear All ROI\tShift+C");
+    AppendMenuA(image, MF_STRING, IDM_ROT90, "Rotate 90 CW");
+    AppendMenuA(image, MF_STRING, IDM_ROT180, "Rotate 180 degrees");
+    AppendMenuA(image, MF_STRING, IDM_ROT270, "Rotate 270 CW");
+    AppendMenuA(image, MF_STRING, IDM_ROT_ANY, "Rotate Arbitrary...");
     AppendMenuA(log, MF_STRING, IDM_OPENLOG, "Open Log File");
     AppendMenuA(log, MF_STRING, IDM_FOLDER, "Open Folder");
     AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HISTOGRAM, "Histogram Panel\tH");
@@ -1505,10 +1781,12 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "File");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mode, "Mode");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)edit, "Edit");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)image, "Image");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "View");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)log, "Log");
     g_menu_mode = mode;
     g_menu_view = view;
+    g_menu_image = image;
     return bar;
 }
 
@@ -1525,6 +1803,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         { FVIRTKEY, 'G', IDM_HIST_G },
         { FVIRTKEY, 'B', IDM_HIST_B },
         { FVIRTKEY, 'L', IDM_HIST_LOG },
+        { FVIRTKEY | FCONTROL, 'S', IDM_SAVE_IMAGE },
         { FVIRTKEY | FCONTROL, 'K', IDM_COMPARE_FILES },
         { FVIRTKEY, 'K', IDM_COMPARE_NEXT }
     };
@@ -1639,8 +1918,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     s_nav_done_tick = GetTickCount();
     while ((result = GetMessageA(&msg, NULL, 0, 0)) > 0) {
         HWND root;
-        if (Compare_PreTranslate(&msg))
+        if (Compare_PreTranslate(&msg)) {
+            g_discard_approved = FALSE;
             continue;
+        }
         root = msg.hwnd ? GetAncestor(msg.hwnd, GA_ROOT) : NULL;
         if (root == g_app.hwnd_main) {
             if (msg.message == WM_KEYUP &&
@@ -1650,17 +1931,23 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
                 (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) &&
                 App_NavKeyAllowed(&msg)) {
                 BOOL repeat = (msg.lParam & (1L << 30)) != 0;
-                if (repeat && (LONG)(msg.time - s_nav_done_tick) < 0)
+                if (repeat && (LONG)(msg.time - s_nav_done_tick) < 0) {
+                    g_discard_approved = FALSE;
                     continue;
+                }
                 App_Navigate(msg.wParam == VK_LEFT ? -1 : 1, repeat);
                 s_nav_done_tick = GetTickCount();
+                g_discard_approved = FALSE;
                 continue;
             }
-            if (TranslateAcceleratorA(g_app.hwnd_main, g_accelerators, &msg))
+            if (TranslateAcceleratorA(g_app.hwnd_main, g_accelerators, &msg)) {
+                g_discard_approved = FALSE;
                 continue;
+            }
         }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
+        g_discard_approved = FALSE;
     }
     if (g_accelerators)
         DestroyAcceleratorTable(g_accelerators);

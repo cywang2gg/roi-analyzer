@@ -20,6 +20,8 @@ add_executable(roi_analyzer
     src/compare_snap.c
     src/compare_v1.c
     src/compare_v2.c
+    src/rotate.c
+    src/image_save.c
 )
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)

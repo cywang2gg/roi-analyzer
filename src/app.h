@@ -32,6 +32,7 @@ typedef struct {
     BOOL multi;
     BOOL show_hist;
     BOOL analysis_stale;
+    BOOL is_modified;
     unsigned int img_gen;
 } app_t;
 
