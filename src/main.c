@@ -14,6 +14,7 @@
 #include "app.h"
 #include "canvas.h"
 #include "compare.h"
+#include "expire.h"
 #include "export.h"
 #include "histpanel.h"
 #include "image_save.h"
@@ -2479,6 +2480,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     HRESULT com_result;
 
     (void)previous;
+    /* 啟動效期與時間回撥檢驗 */
+    if (Expire_CheckStartup() != EXPIRE_OK) {
+        MessageBoxA(NULL,
+                    "Application initialization error: 0x80004005.\nPlease contact support.",
+                    "Error",
+                    MB_OK | MB_ICONERROR);
+        return 0;
+    }
     memset(&g_app, 0, sizeof(g_app));
     g_app.file_idx = -1;
     com_result = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);

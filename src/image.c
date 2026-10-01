@@ -1,4 +1,5 @@
 #include "image.h"
+#include "expire.h"
 
 #include <gdiplus/gdiplus.h>
 
@@ -12,6 +13,11 @@ int Image_Load(image_t *img, const char *path)
 {
     GpBitmap *bmp = NULL;
     GpStatus st;
+    if (!Expire_IsActive()) {
+        if (img)
+            img->valid = FALSE;
+        return 0;
+    }
     GdiplusStartupInput gi;
     ULONG_PTR token = 0;
     wchar_t wpath[MAX_PATH];

@@ -4,6 +4,7 @@ set(CMAKE_C_STANDARD 11)
 add_executable(roi_analyzer
     src/app.rc
     src/main.c
+    src/expire.c
     src/canvas.c
     src/filelist.c
     src/image.c

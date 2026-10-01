@@ -87,7 +87,7 @@ int Export_Log(const image_t *img, const roi_list_t *rois)
     char path[MAX_PATH];
     char line[1024];
     SYSTEMTIME now;
-    int source_index, i, failed = 0;
+    int source_index, i, is_new, failed = 0;
     static const roi_mode_t modes[] = { MODE_DRAG, MODE_GRID3, MODE_GRID5 };
     static const roi_source_t sources[] = {
         ROI_SRC_MANUAL, ROI_SRC_GRID3, ROI_SRC_GRID5
@@ -110,6 +110,24 @@ int Export_Log(const image_t *img, const roi_list_t *rois)
             failed = 1;
             break;
         }
+        fseek(file, 0, SEEK_END);
+        is_new = (ftell(file) == 0);
+        if (is_new) {
+            /* UTF-8 BOM: Excel 直接開啟時自動以 UTF-8 解碼中文路徑 */
+            static const unsigned char bom[3] = { 0xEF, 0xBB, 0xBF };
+            if (fwrite(bom, 1, sizeof(bom), file) != sizeof(bom)) {
+                failed = 1;
+                fclose(file);
+                break;
+            }
+        } else {
+            line[0] = 0x0D; line[1] = 0x0A;
+            if (fwrite(line, 1, 2, file) != 2) {
+                failed = 1;
+                fclose(file);
+                break;
+            }
+        }
         GetLocalTime(&now);
         _snprintf(line, sizeof(line),
                   "# ==== export [%04u-%02u-%02u %02u:%02u:%02u] image=%s size=%dx%d mode=%s rois=%d\r\n",
@@ -119,6 +137,16 @@ int Export_Log(const image_t *img, const roi_list_t *rois)
         line[sizeof(line) - 1] = '\0';
         if (write_utf8(file, line) != 0)
             failed = 1;
+        if (!failed) {
+            _snprintf(line, sizeof(line),
+                      "id\tYm\tRm\tGm\tBm\tYs\tRs\tGs\tBs\tL\tA\tB\trect\tcount\r\n");
+            line[sizeof(line) - 1] = '\0';
+            if (write_utf8(file, line) != 0) {
+                failed = 1;
+                fclose(file);
+                break;
+            }
+        }
         for (i = 0; i < rois->count && !failed; i++) {
             const roi_result_t *r;
             if (rois->items[i].source != sources[source_index])
@@ -126,34 +154,19 @@ int Export_Log(const image_t *img, const roi_list_t *rois)
             number++;
             r = &rois->items[i].res;
             _snprintf(line, sizeof(line),
-                      "# roi %d rect=(%d,%d)-(%d,%d) count=%d\r\n",
-                      number, r->x0, r->y0, r->x1, r->y1, r->count);
-            line[sizeof(line) - 1] = '\0';
-            if (write_utf8(file, line) != 0) {
-                failed = 1;
-                break;
-            }
-            _snprintf(line, sizeof(line),
-                      "RGB mean=(%.2f,%.2f,%.2f) std=(%.2f,%.2f,%.2f)\r\n",
+                      "%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t(%d,%d)-(%d,%d)\t%d\r\n",
+                      number,
+                      clean_zero(r->y_mean),
                       clean_zero(r->r_mean), clean_zero(r->g_mean), clean_zero(r->b_mean),
-                      clean_zero(r->r_std), clean_zero(r->g_std), clean_zero(r->b_std));
+                      clean_zero(r->y_std),
+                      clean_zero(r->r_std), clean_zero(r->g_std), clean_zero(r->b_std),
+                      clean_zero(r->lab_l), clean_zero(r->lab_a), clean_zero(r->lab_b),
+                      r->x0, r->y0, r->x1, r->y1, r->count);
             line[sizeof(line) - 1] = '\0';
             if (write_utf8(file, line) != 0) {
                 failed = 1;
                 break;
             }
-            _snprintf(line, sizeof(line), "Y mean=%.2f std=%.2f\r\n",
-                      clean_zero(r->y_mean), clean_zero(r->y_std));
-            line[sizeof(line) - 1] = '\0';
-            if (write_utf8(file, line) != 0) {
-                failed = 1;
-                break;
-            }
-            _snprintf(line, sizeof(line), "Lab L=%.2f a=%.2f b=%.2f\r\n",
-                      clean_zero(r->lab_l), clean_zero(r->lab_a), clean_zero(r->lab_b));
-            line[sizeof(line) - 1] = '\0';
-            if (write_utf8(file, line) != 0)
-                failed = 1;
         }
         if (fclose(file) != 0)
             failed = 1;
