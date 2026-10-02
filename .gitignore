@@ -6,3 +6,5 @@ testdata/*_3x3.log
 testdata/*_5x5.log
 bin/*.png
 bin/*.ini
+# v3.3: exe 同目錄的 onnxruntime.dll 由 third_party 部署副本取得，不進版控
+bin/onnxruntime.dll
