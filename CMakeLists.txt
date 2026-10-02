@@ -33,9 +33,19 @@ add_executable(roi_analyzer
     src/fft.c
     src/report.c
     src/metrics_async.c
+    src/yolo_ort.c
+    src/yolo_post.c
 )
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)
+target_include_directories(roi_analyzer SYSTEM PRIVATE third_party/onnxruntime/include)
 target_compile_definitions(roi_analyzer PRIVATE NOMINMAX)
 target_link_libraries(roi_analyzer user32 gdi32 kernel32 comctl32 comdlg32 gdiplus shell32 shlwapi windowscodecs ole32 uuid m)
 set_target_properties(roi_analyzer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin LINK_FLAGS "-mwindows")
+
+add_executable(test_yolo_post tests/test_yolo_post.c src/yolo_post.c)
+target_compile_options(test_yolo_post PRIVATE -Wall -Wextra -Wno-unused-variable -Wno-unused-but-set-variable)
+target_include_directories(test_yolo_post PRIVATE src)
+target_link_libraries(test_yolo_post m)
+enable_testing()
+add_test(NAME test_yolo_post COMMAND test_yolo_post)
