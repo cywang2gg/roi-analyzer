@@ -5,6 +5,8 @@
 #include <windowsx.h>
 
 #include "app.h"
+#include "app_messages.h"
+#include "detect.h"
 
 #define WM_CANVAS_BUILD_PYRAMID (WM_APP + 1)
 
@@ -126,6 +128,47 @@ static void draw_roi_overlay(HDC hdc)
     }
 }
 
+static void draw_detection_overlay(HDC hdc)
+{
+    const yolo_detection_t *detections;
+    size_t count = Detect_GetResults(&detections);
+    size_t i;
+
+    if (g_app.view.scale <= 0.0f)
+        return;
+    for (i = 0; i < count; ++i) {
+        RECT image_rect, window_rect;
+        char label[64];
+        SIZE text_size;
+        RECT label_rect;
+        int x, y;
+
+        image_rect.left = (LONG)detections[i].x1;
+        image_rect.top = (LONG)detections[i].y1;
+        image_rect.right = (LONG)detections[i].x2;
+        image_rect.bottom = (LONG)detections[i].y2;
+        View_RectToWindow(&g_app.view, image_rect, &window_rect);
+        draw_outline(hdc, &window_rect, RGB(255, 0, 255), 2, PS_SOLID);
+        _snprintf(label, sizeof(label), "color-chart %.2f",
+                  (double)detections[i].score);
+        label[sizeof(label) - 1] = '\0';
+        GetTextExtentPoint32A(hdc, label, (int)strlen(label), &text_size);
+        x = window_rect.left;
+        y = window_rect.top - text_size.cy - 4;
+        if (y < 0)
+            y = window_rect.top;
+        label_rect.left = x;
+        label_rect.top = y;
+        label_rect.right = x + text_size.cx + 6;
+        label_rect.bottom = y + text_size.cy + 4;
+        SetBkMode(hdc, OPAQUE);
+        SetBkColor(hdc, RGB(0, 0, 0));
+        SetTextColor(hdc, RGB(255, 255, 255));
+        ExtTextOutA(hdc, x + 3, y + 2, ETO_OPAQUE, &label_rect, label,
+                    (UINT)strlen(label), NULL);
+    }
+}
+
 BOOL Canvas_Register(HINSTANCE instance)
 {
     WNDCLASSA wc;
@@ -141,6 +184,13 @@ BOOL Canvas_Register(HINSTANCE instance)
 LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
+    case WM_TIMER:
+        if (wparam == IDT_DETECT_DELAY) {
+            if (!PostMessageA(g_app.hwnd_main, WM_TIMER, wparam, 0))
+                OutputDebugStringA("ROI Analyzer: could not dispatch detection timer.\n");
+            return 0;
+        }
+        break;
     case WM_CANVAS_BUILD_PYRAMID:
         build_pyramid(hwnd);
         return 0;
@@ -378,6 +428,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
                                       &g_app.pyramid);
             else
                 View_DrawImage(mem, &g_app.view, &g_app.img);
+            draw_detection_overlay(mem);
             draw_roi_overlay(mem);
         }
         BitBlt(hdc, rc.left, rc.top, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);

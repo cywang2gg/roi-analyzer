@@ -15,6 +15,8 @@
 #include "app.h"
 #include "canvas.h"
 #include "compare.h"
+#include "app_messages.h"
+#include "detect.h"
 #include "export.h"
 #include "histpanel.h"
 #include "image_save.h"
@@ -146,6 +148,8 @@ static void App_OnDropFiles(HDROP drop);
 static void App_HandleNewFileArrival(const char *path);
 static void App_DrainPromptQueue(void);
 static void App_SchedulePromptQueue(void);
+static void App_ReplaceImage(image_t *loaded);
+static void App_UnloadImage(void);
 
 static BOOL copy_utf8_to_acp(char *destination, size_t capacity,
                              const char *source)
@@ -243,6 +247,7 @@ void App_UpdateStatus(void)
     char mode[192];
     char time[128];
     char browsing[32];
+    char detect_status[256];
     const char *message;
     POINT screen, client, image_point;
 
@@ -269,6 +274,9 @@ void App_UpdateStatus(void)
               g_load_ms, g_analyze_ms, g_hist_ms, g_app.paint_ms,
               g_show_ms, g_done_ms);
     message = g_nav_status;
+    Detect_GetStatusText(detect_status, sizeof(detect_status));
+    if (detect_status[0] != '\0')
+        message = detect_status;
     if (g_browsing) {
         if (copy_utf8_to_acp(browsing, sizeof(browsing), "瀏覽中…"))
             message = browsing;
@@ -282,6 +290,23 @@ void App_UpdateStatus(void)
     SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_MODE, (LPARAM)mode);
     App_StatusSetIndex();
     SendMessageA(g_app.hwnd_status, SB_SETTEXTA, SB_PART_TIME, (LPARAM)time);
+}
+
+static void App_ReplaceImage(image_t *loaded)
+{
+    image_t previous = g_app.img;
+
+    Detect_OnImageUnloading();
+    g_app.img = *loaded;
+    ZeroMemory(loaded, sizeof(*loaded));
+    Image_Free(&previous);
+    Detect_OnImageLoaded();
+}
+
+static void App_UnloadImage(void)
+{
+    Detect_OnImageUnloading();
+    Image_Free(&g_app.img);
 }
 
 static BOOL App_SaveImage(void)
@@ -652,7 +677,7 @@ static BOOL rebuild_navigation_grids(BOOL had_grid3, BOOL had_grid5, BOOL light)
 
 void App_Navigate(int direction, BOOL light)
 {
-    image_t loaded, previous;
+    image_t loaded;
     LARGE_INTEGER load_started, analyze_started, show_started;
     BOOL exact = FALSE, same_size, had_grid3, had_grid5, grids_cleared = FALSE;
     int current, target, skipped = 0, skipped_non_acp = 0;
@@ -738,15 +763,13 @@ void App_Navigate(int direction, BOOL light)
         return;
     }
 
-    previous = g_app.img;
-    same_size = previous.w == loaded.w && previous.h == loaded.h;
+    same_size = g_app.img.w == loaded.w && g_app.img.h == loaded.h;
     had_grid3 = ROI_SourceCount(&g_app.rois, ROI_SRC_GRID3) > 0;
     had_grid5 = ROI_SourceCount(&g_app.rois, ROI_SRC_GRID5) > 0;
     ViewPyr_Free(&g_app.pyramid);
     g_app.pyramid_attempted = FALSE;
     g_app.pyramid_pending = FALSE;
-    g_app.img = loaded;
-    Image_Free(&previous);
+    App_ReplaceImage(&loaded);
     g_app.is_modified = FALSE;
     g_app.img_gen++;
     g_app.file_idx = target;
@@ -1059,8 +1082,7 @@ static BOOL OpenImageFile(const char *path)
                     "Open", MB_OK | MB_ICONWARNING);
         return FALSE;
     }
-    Image_Free(&g_app.img);
-    g_app.img = loaded;
+    App_ReplaceImage(&loaded);
     g_app.is_modified = FALSE;
     ROI_Clear(&g_app.rois, &g_app.drag);
     g_app.img_gen++;
@@ -1870,7 +1892,7 @@ static void App_PerformRename(void)
         overwrite = TRUE;
     }
 
-    Image_Free(&g_app.img);
+    App_UnloadImage();
     ViewPyr_Free(&g_app.pyramid);
     g_app.pyramid_attempted = FALSE;
     g_app.pyramid_pending = FALSE;
@@ -2217,8 +2239,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
                 TabCtrl_InsertItem(g_app.hwnd_tabs, i, &tab);
             }
         }
+        (void)Detect_Init(hwnd);
         DragAcceptFiles(hwnd, TRUE);
         Layout();
+        App_UpdateStatus();
         return 0;
     }
     case WM_SIZE:
@@ -2385,10 +2409,27 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
     case WM_APP_DRAIN_NEW_FILES:
         App_DrainPromptQueue();
         return 0;
+    case WM_APP_DETECT_INIT:
+        Detect_OnInitResult((detect_init_result_t *)lparam);
+        App_UpdateStatus();
+        return 0;
+    case WM_APP_DETECT_DONE:
+        if (wparam == DETECT_RESULT_ALLOCATION_FAILURE)
+            Detect_OnResultAllocationFailure((LONG)lparam);
+        else
+            Detect_OnResult((detect_result_t *)lparam);
+        App_UpdateStatus();
+        return 0;
     case WM_TIMER:
         if (wparam == PROMPT_DRAIN_TIMER) {
             KillTimer(hwnd, PROMPT_DRAIN_TIMER);
             App_DrainPromptQueue();
+            return 0;
+        }
+        if (wparam == IDT_DETECT_DELAY) {
+            Detect_OnTimer(g_app.img.px, g_app.img.w, g_app.img.h,
+                           g_app.img.pitch);
+            App_UpdateStatus();
             return 0;
         }
         break;
@@ -2398,6 +2439,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        Detect_Shutdown();
         Monitor_Shutdown();
         KillTimer(hwnd, PROMPT_DRAIN_TIMER);
         {

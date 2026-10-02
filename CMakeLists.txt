@@ -33,6 +33,8 @@ add_executable(roi_analyzer
     src/fft.c
     src/report.c
     src/metrics_async.c
+    src/detect.c
+    src/detect_worker.c
     src/yolo_ort.c
     src/yolo_post.c
 )
