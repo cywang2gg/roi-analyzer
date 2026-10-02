@@ -13,19 +13,21 @@
 | V5 | RGB mean/std 正确 | 纯色 + 渐变测试图 | 纯色 std=0,渐变 mean/std 与 Python 参考值一致(容差 0.01) |
 | V6 | Y mean/std 正确 | 同上 | `Y=0.299R+0.587G+0.114B`,与参考值一致(容差 0.01) |
 | V7 | Lab 正确 | 标准色块 | 与 c-vlcplayer `rgb_to_lab` 同输入同输出(容差 0.05);白场 L≈100、a/b≈0,黑场 L≈0 |
-| V8 | per-image/mode log 格式正确 | 检查源目录 `<image>_<mode>.log` | `# roi rect` 开头,RGB/Y/Lab 数值保留 2 位小数,同图同模式 append 不覆盖旧记录 |
+| V8 | per-image/mode CSV 格式正确 | 檢查源目錄 `<image>_<mode>.csv` | UTF-16LE BOM（`FF FE`）僅在檔案開頭；沒有 `sep=` 行；每區塊先有 `# ==== export`、`id Rm…b rect count` 14 欄 tab 表頭，ROI 每行 14 欄且數值 2 位小數；續寫有空行且不重複 BOM |
 | V9 | 越界/空图鲁棒性 | 边界点击、无图操作 | 不崩溃、无 log 写入、状态栏提示 |
 | V10 | 旋转正确（v2.8） | 90°×4 回原图；90°/180°/270° 各一次 | 画布适配新尺寸，ROI 框位置正确（§3 公式），表格数值更新，标题列＋状态列出现 `*`；90°×4 与原图逐像素一致 |
 | V11 | 未存档防护（v2.8） | 旋转后按 →／开档／拖放／关窗／开比较 | 弹 Yes／No／Cancel：Yes 存档后继续（`*` 消失），No 直接继续，Cancel 留原地 |
 | V12 | 存档＋比较关闭（v2.8） | 旋转后 Ctrl+S；旋转时开着 V1/V2 | 覆盖原路径 PNG，`*` 消失，状态列 `Saved <档名>`；比较视窗自动关闭 |
 | V13 | 直方图 Y 行（v1.3） | RGB 叠合模式看统计列 | 显示 R/G/B/Y 四列，各 Mean／StdDev／Median |
 | V14 | 監控觸發＋彈窗（v2.9 M1–M9） | 設監控路徑後丟新圖；連拍 5 檔；雙開 exe | 彈窗含唯讀縮圖＋5 按鈕；連拍依序彈不漏（ring 64）；雙開不重彈；Modal 忙碌只入隊 |
-| V15 | 更名＋防護（v2.9 R1–R8） | F2 更名；非法字元／保留字／覆寫；旋轉未存檔按 F2 | 更名成功載新圖＋log 連動；非法／保留字阻擋；覆寫先備份 `.bak`；未存檔單一檢查點只問一次 |
+| V15 | 更名＋防護（v2.9 R1–R8） | F2 更名；非法字元／保留字／覆寫；旋轉未存檔按 F2 | 更名成功載新圖＋CSV 連動；非法／保留字阻擋；覆寫先備份 `.bak`；未存檔單一檢查點只問一次 |
 | V16 | self-trigger 迴圈抑制（v2.9） | 監控目錄進檔→彈窗更名 `ddd_X` | 只彈一次，不再二次彈窗；`LastRenamePrefix` 不疊加；外部相機 5 秒後進檔正常觸發 |
 | V17 | Metrics 一期指標（v3.0） | V1/V2 開 2 張圖按 Metrics（或 Ctrl+M） | HTML 報告開瀏覽器：Laplacian／Sobel／8 向對比／SNR／亮度四區／飽和度欄位齊全 |
 | V18 | Metrics 二期＋4MP 非同步（v3.0） | Stage2 開啟；4MP 以上大圖按 Metrics | FFT 三頻帶＋Lab 色偏＋邊緣圖 Base64 內嵌；大圖走背景執行緒、UI 不凍結，進度框可取消 |
 | V19 | Metric Set v2 遮罩驅動量測（v3.1） | 同一場景 3 張標準圖（清晰／普通／模糊）跑 Metrics | S1 遞減、S2 遞增、S3 單調；Edge／Flat／Neutral 覆蓋率合理（Flat 未被邊緣污染）；樣本不足項顯示 N/A＋reason，不回 0 |
 | V20 | 排名引擎＋報告升級（v3.1） | 2～4 張圖跑 Metrics，切換 profile | 四方向正規化分數 0–100；類別分＋綜合排名正確；差異 ≤2 分標 `≈` 並列；HTML 含熱力表／SVG 雷達／警示區／legacy 收合／CSV 匯出；3 視圖縮圖內嵌 |
+| V21 | 放大繪製來源列帶鏡像修正（v3.2） | 開大圖（如 4000×3000）→ `Ctrl+滾輪` 放大至超出視窗 → 分別向上、向下平移，將 ROI 框在**已知格線位置** | **框住的內容 = 框住的區域**（框不再與內容錯開）；上下平移方向皆正確；`zoom ≤ 1` 行為不變；headless harness 探測點 16/16 `OK`（修正前裁切情境 8/8 `DRIFT`） |
+| V22 | 放大繪製 dest 反推（局部比例）（v3.2） | 同上情境，於畫面**左端與右端**各量一次 ROI 框邊界與最近格線的螢幕距離 | 局部比例 == 全域 `scale`，誤差 < 1 px 且**不隨距離由左往右累積**（修正前右緣可累積至 ~`scale` px）；`zoom` 1.0×／2.0×／3.7×／8.0× 皆同 |
 
 ## 2. 测试图生成(Python 参考实现)
 
@@ -86,14 +88,14 @@ def ref_stats(path, x0, y0, x1, y1):
                 b=(m(bs),std(b2,bs)), y=(m(ys),std(y2,ys)))
 ```
 
-流程:C 程序框选 → 读源目录当前图片、当前模式的 `<image>_<mode>.log` 最后一条记录 → 与 `ref_stats` 同区域输出对比,容差 0.01。
+流程:C 程序框选 → 读源目录当前图片、当前模式的 `<image>_<mode>.csv` 最后一条資料行 → 与 `ref_stats` 同区域输出对比,容差 0.01。
 
 ## 4. 验证步骤(手动清单)
 
 1. 构建:`cmake --build build`,确认 0 warning,exe 存在。
 2. 拖入 `test_red.png` → 标题栏显示 `test_red.png 100x100`。
 3. 按 `1`(drag),全图框选 → 状态栏显示 `R=255.00 G=0.00 B=0.00 Y=76.24`。
-4. 检查测试图源目录的 `test_red_drag.log`,核对最后一条记录 = §2 期望值,并确认不存在 `test_red_log.log`、`roi_log.csv` 或 `roi_log.txt`。
+4. 檢查測試圖源目錄的 `test_red_drag.csv`，核對最後一列 = §2 期望值及 `id Rm…b rect count` 14 欄順序；重複 Export 後確認 UTF-16LE BOM 只在 offset 0、沒有額外首行、區塊間有空行，舊 `.log`／`.tsv` 檔未被修改。
 5. 拖入 `test_grad_r.png`,drag 全图 → R_std ≈ 73.9(0..255 均匀分布总体 std = 255/√12 ≈ 73.90),Y_std ≈ 22.09(0.299×73.90)。
 6. 按 `2`(fix3)任意点一下 → count=9;按 `3`(fix5) → count=25。
 7. 在影像边缘点一下 fix5 → 框被 clamp,仍 count=25 且不崩溃。
@@ -117,7 +119,7 @@ def ref_stats(path, x0, y0, x1, y1):
 V2-V4 坐标: ✅ count/坐标与预期一致
 V5-V6 RGB/Y: ✅ 与 ref_stats 一致(容差内)
 V7 Lab: ✅ 与 c-vlcplayer 一致,白/黑场正确
-V8 log: ✅ 源目录 per-image/per-mode `.log`,`# roi rect` 格式,2 位小数,append 正常
+V8 CSV: ✅ 源目錄 per-image/per-mode `.csv`，UTF-16LE BOM、無額外首行、14 欄 tab 分隔、兩位小數及 append 區塊分隔正確
 V9 鲁棒性: ✅ 无崩溃
 结论: 通过 / 不通过(注明失败项)
 ```

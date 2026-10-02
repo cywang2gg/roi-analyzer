@@ -3,6 +3,7 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <gdiplus/gdiplus.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <objbase.h>
@@ -44,7 +45,7 @@
 #define IDM_DELETE     121
 #define IDM_CLEAR      122
 #define IDM_CLEAR_ALL  123
-#define IDM_OPENLOG    131
+#define IDM_OPENCSV    131
 #define IDM_FOLDER     132
 #define IDM_ZOOM_IN    141
 #define IDM_ZOOM_OUT   142
@@ -1999,17 +2000,47 @@ static void App_DrainPromptQueue(void)
 static void ExportCurrent(void)
 {
     char paths[3][MAX_PATH];
+    char error_path[MAX_PATH] = "";
     char status[512] = "Exported:";
-    int i, used = (int)strlen(status);
+    int i, used = (int)strlen(status), export_result;
     static const roi_mode_t modes[] = { MODE_DRAG, MODE_GRID3, MODE_GRID5 };
     if (g_app.rois.count == 0) {
         MessageBoxA(g_app.hwnd_main, "尚無 ROI", "Export",
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (!g_app.img.valid || Export_Log(&g_app.img, &g_app.rois) != 0) {
-        MessageBoxA(g_app.hwnd_main, "Could not open or write the export log.",
-                    "Export", MB_OK | MB_ICONERROR);
+    errno = 0;
+    export_result = g_app.img.valid ?
+                    Export_Log(&g_app.img, &g_app.rois, error_path,
+                               sizeof(error_path)) : -1;
+    if (export_result != 0) {
+        if (errno == EACCES)
+            MessageBoxA(g_app.hwnd_main,
+                        "Could not write the CSV export. The file may be locked by another program (such as Excel). Close it and try again.",
+                        "Export", MB_OK | MB_ICONERROR);
+        else if (errno == EILSEQ) {
+            char message[512];
+
+            if (error_path[0]) {
+                _snprintf(message, sizeof(message),
+                          "匯出檔為舊格式（非 Unicode），為避免損壞無法續寫。請改用新檔名或先移除舊檔後再試。\n%s",
+                          error_path);
+                message[sizeof(message) - 1] = '\0';
+                MessageBoxA(g_app.hwnd_main, message, "Export",
+                            MB_OK | MB_ICONERROR);
+            } else {
+                MessageBoxA(g_app.hwnd_main,
+                            "匯出檔為舊格式（非 Unicode），為避免損壞無法續寫。請改用新檔名或先移除舊檔後再試。",
+                            "Export", MB_OK | MB_ICONERROR);
+            }
+        } else if (errno == EINVAL) {
+            MessageBoxA(g_app.hwnd_main,
+                        "The CSV export file is incomplete and cannot be appended. Remove it or choose a new filename.",
+                        "Export", MB_OK | MB_ICONERROR);
+        } else {
+            MessageBoxA(g_app.hwnd_main, "Could not open or write the CSV export.",
+                        "Export", MB_OK | MB_ICONERROR);
+        }
         return;
     }
     for (i = 0; i < 3; i++) {
@@ -2036,23 +2067,23 @@ static void ExportCurrent(void)
     App_UpdateStatus();
 }
 
-static void OpenLogFile(void)
+static void OpenCsvFile(void)
 {
     char path[MAX_PATH];
     if (!g_app.img.valid) {
-        MessageBoxA(g_app.hwnd_main, "No current image.", "Log",
+        MessageBoxA(g_app.hwnd_main, "No current image.", "CSV",
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (Export_GetPath(&g_app.img, g_app.mode, path, sizeof(path)) == 0 &&
         GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
         if ((INT_PTR)ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL) <= 32)
-            MessageBoxA(g_app.hwnd_main, "Could not open the log file.", "Log",
+            MessageBoxA(g_app.hwnd_main, "Could not open the CSV file.", "CSV",
                         MB_OK | MB_ICONERROR);
         return;
     }
-    MessageBoxA(g_app.hwnd_main, "The current image has no log file.",
-                "Log", MB_OK | MB_ICONINFORMATION);
+    MessageBoxA(g_app.hwnd_main, "The current image has no CSV file.",
+                "CSV", MB_OK | MB_ICONINFORMATION);
 }
 
 static void OpenImageFolder(void)
@@ -2283,8 +2314,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             ChangeZoom(1.1f);
         else if (id == IDM_ZOOM_OUT)
             ChangeZoom(1.0f / 1.1f);
-        else if (id == IDM_OPENLOG)
-            OpenLogFile();
+        else if (id == IDM_OPENCSV)
+            OpenCsvFile();
         else if (id == IDM_FOLDER)
             OpenImageFolder();
         else if (id == IDM_HISTOGRAM) {
@@ -2397,7 +2428,7 @@ static HMENU CreateMainMenu(void)
     HMENU mode = CreatePopupMenu();
     HMENU edit = CreatePopupMenu();
     HMENU image = CreatePopupMenu();
-    HMENU log = CreatePopupMenu();
+    HMENU csv = CreatePopupMenu();
     HMENU view = CreatePopupMenu();
 
     AppendMenuA(file, MF_STRING, IDM_OPEN, "Open...\tO");
@@ -2405,7 +2436,7 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(file, MF_STRING, IDM_RENAME_FILE, "Rename File...\tF2");
     AppendMenuA(file, MF_STRING, IDM_PREVIOUS, "Previous Image");
     AppendMenuA(file, MF_STRING, IDM_NEXT, "Next Image");
-    AppendMenuA(file, MF_STRING, IDM_EXPORT, "Export Log\tCtrl+E");
+    AppendMenuA(file, MF_STRING, IDM_EXPORT, "Export CSV\tCtrl+E");
     AppendMenuA(file, MF_STRING, IDM_MONITOR_SETTINGS,
                 "Folder Monitor Settings...");
     AppendMenuA(file, MF_SEPARATOR, 0, NULL);
@@ -2422,8 +2453,8 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(image, MF_STRING, IDM_ROT180, "Rotate 180 degrees");
     AppendMenuA(image, MF_STRING, IDM_ROT270, "Rotate 270 CW");
     AppendMenuA(image, MF_STRING, IDM_ROT_ANY, "Rotate Arbitrary...");
-    AppendMenuA(log, MF_STRING, IDM_OPENLOG, "Open Log File");
-    AppendMenuA(log, MF_STRING, IDM_FOLDER, "Open Folder");
+    AppendMenuA(csv, MF_STRING, IDM_OPENCSV, "Open CSV File");
+    AppendMenuA(csv, MF_STRING, IDM_FOLDER, "Open Folder");
     AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HISTOGRAM, "Histogram Panel\tH");
     AppendMenuA(view, MF_SEPARATOR, 0, NULL);
     AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HIST_RGB, "Channel: RGB\tA");
@@ -2446,7 +2477,7 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)edit, "Edit");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)image, "Image");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "View");
-    AppendMenuA(bar, MF_POPUP, (UINT_PTR)log, "Log");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)csv, "CSV");
     g_menu_mode = mode;
     g_menu_view = view;
     g_menu_image = image;

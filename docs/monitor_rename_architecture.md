@@ -23,7 +23,7 @@
 | 2 | 監控設定 UI | 模態對話框（`IDD_MONITOR_SETTINGS`）：3 組路徑編輯框、瀏覽資料夾按鈕、啟用勾選框，並持久化至 `roi_analyzer.ini` |
 | 3 | 新檔提示彈窗 | 模態對話框（`IDD_NEW_FILE_PROMPT`）：縮圖預覽、檔名編輯、5 種操作按鈕、記憶體與 INI 雙層前綴記憶 |
 | 4 | 寫入防護與多開防重 | 寫入完成等待**限定背景執行緒**（worker 內 `Sleep(500)` 起步＋`File_WaitForWriteComplete` size-穩定輪詢，UI 端收到 `WM_APP_NEW_FILE` 即彈窗、不可再 Sleep）；具名 Mutex（`"RoiAnalyzer_NewFileMutex"`）**瞬時持有**僅做多實例防重＋單實例待處理佇列（ring 64，滿則狀態列提示、不靜默丟） |
-| 5 | 影像更名 | `File > Rename File...` 選單與 `F2` 快捷鍵；嚴格 Handle 釋放順序；非法字元校驗；目標存在覆寫確認；關聯 log 同步更名 |
+| 5 | 影像更名 | `File > Rename File...` 選單與 `F2` 快捷鍵；嚴格 Handle 釋放順序；非法字元校驗；目標存在覆寫確認；關聯 CSV 同步更名 |
 | 6 | 前綴自動提取 | 純 C 實作 `ExtractPrefix`，識別後綴差集或包含關係，自動儲存並作為下次命名預設值 |
 | 7 | 狀態衝突收斂 | 旋轉未存檔（`is_modified`）攔截防護；更名主圖時關閉比較視窗（`Compare_CloseAll()`）；僅更名時依目錄關係刷新 `filelist` |
 
@@ -120,7 +120,7 @@ BOOL Rename_IsSupportedExtension(const char *file_path);
 
 /* 執行檔案更名：覆寫前先備份被覆蓋目標為 .bak（無條件帶 MOVEFILE_REPLACE_EXISTING；
    overwrite 參數僅控制「未確認時是否執行」，確認流程由呼叫端 MessageBox 負責）＋同目錄
-   per-image log 檔案連動搬移（失敗只警告、不回滾主更名）。
+   per-image CSV 檔案連動搬移（失敗只警告、不回滾主更名）。
    成功回傳 0；失敗回傳 GetLastError() 錯誤碼。 */
 DWORD Rename_Execute(const char *old_path, const char *new_name,
                      char *out_new_path, size_t cap, BOOL overwrite);
@@ -331,9 +331,9 @@ Win32 監控目錄變更的核心函式為 `ReadDirectoryChangesW`（無 ANSI �
      - 取得 err = GetLastError()。
      - MessageBoxA 顯示更名失敗原因。
      - 調用 OpenImageFile(old_path) 進行回滾載入，還原視窗顯示，返回。
-9. 關聯 log 檔案搬移:
-   - 檢查是否存在 `<dir>/<old_base>_drag.log`、`grid3x3.log`、`grid5x5.log`。
-   - 若存在，呼叫 MoveFileExA 將其更名為 `<new_base>_<mode>.log`。
+9. 關聯 CSV 檔案搬移:
+   - 檢查是否存在 `<dir>/<old_base>_drag.csv`、`grid3x3.csv`、`grid5x5.csv`。
+   - 若存在，呼叫 MoveFileExA 將其更名為 `<new_base>_<mode>.csv`。
 10. 前綴記憶儲存:
     - ExtractPrefix(new_base, old_base, prefix, sizeof(prefix))。
     - 若 prefix 非空，調用 Settings_SaveLastRenamePrefix(prefix)。
@@ -601,12 +601,12 @@ BOOL Rename_IsSupportedExtension(const char *file_path)
 
 ### 7.4 關聯 ROI Log 檔案更名策略
 
-`roi-analyzer` 的匯出機制會於影像同目錄產出 `<image>_<mode>.log`（例如 `sample_grid3x3.log`、`sample_drag.log`）。
-- **處理策略**：更名主影像時，走訪檢查並連動搬移存在之關聯 log 檔案：
-  - `<dir>/<old_base>_drag.log` → `<dir>/<new_base>_drag.log`
-  - `<dir>/<old_base>_grid3x3.log` → `<dir>/<new_base>_grid3x3.log`
-  - `<dir>/<old_base>_grid5x5.log` → `<dir>/<new_base>_grid5x5.log`
-- 確保更名後點選 `Log > Open Log File` 仍能正確開啟歷史分析紀錄，維持資料連續性。
+`roi-analyzer` 的匯出機制會於影像同目錄產出 `<image>_<mode>.csv`（例如 `sample_grid3x3.csv`、`sample_drag.csv`）。
+- **處理策略**：更名主影像時，走訪檢查並連動搬移存在之關聯 CSV 檔案：
+  - `<dir>/<old_base>_drag.csv` → `<dir>/<new_base>_drag.csv`
+  - `<dir>/<old_base>_grid3x3.csv` → `<dir>/<new_base>_grid3x3.csv`
+  - `<dir>/<old_base>_grid5x5.csv` → `<dir>/<new_base>_grid5x5.csv`
+- 確保更名後點選 `CSV > Open CSV File` 仍能正確開啟歷史分析紀錄，維持資料連續性。
 - **錯誤語義**：log 搬移失敗（被編輯器佔住）**只警告、不回滾主更名**；先搬 log 後 `OpenImageFile(new)` 若解碼失敗，
   log 已改名而圖沒載入——不一致但可接受（註明）。
 - **INI 落點**：`roi_analyzer.ini` 落 exe 同目錄（可攜式前設）；Program Files 下無寫權限時不做 fallback（註明限制）。
@@ -631,7 +631,7 @@ BOOL Rename_IsSupportedExtension(const char *file_path)
 | ID 常數 | 數值 | 選單位置 | 顯示文字 | 說明 |
 |---------|------|----------|----------|------|
 | `IDM_RENAME_FILE` | 107 | File（Save Image 之後） | `Rename File...\tF2` | 主影像檔案更名 |
-| `IDM_MONITOR_SETTINGS` | 108 | File（Export Log 之後） | `Folder Monitor Settings...` | 開啟資料夾監控設定 |
+| `IDM_MONITOR_SETTINGS` | 108 | File（Export CSV 之後） | `Folder Monitor Settings...` | 開啟資料夾監控設定 |
 
 ### 8.2 對話框與控制項 ID
 
@@ -684,7 +684,7 @@ BOOL Rename_IsSupportedExtension(const char *file_path)
 | R4 | 非法字元防護 | 輸入含 `*?<>:"/\|` 或全形空格之檔名 | 彈出錯誤訊息提示非法字元，阻止更名並保留於輸入對話框，磁碟原檔不變 |
 | R5 | 目標已存在覆寫防護（含備份） | 輸入同一目錄下已存在之檔名 | 彈出 MessageBox 詢問是否覆寫：選 No 返回；選 Yes 先將既有目標搬為 `.bak`（已存在則 `_conflict_N`），再覆寫並重新載入 |
 | R6 | Handle 徹底釋放 | 於高解析度圖檔（含金字塔快取與分區 ROI）執行更名 | 記憶體、DC、金字塔及表格確實釋放，更名不回傳 `ERROR_SHARING_VIOLATION` |
-| R7 | 關聯 log 檔案連動 | 對已匯出 `_grid3x3.log` 之影像進行更名 | 同目錄下之 `<old>_grid3x3.log` 自動更名為 `<new>_grid3x3.log`，無日誌遺失 |
+| R7 | 關聯 CSV 檔案連動 | 對已匯出 `_grid3x3.csv` 之影像進行更名 | 同目錄下之 `<old>_grid3x3.csv` 自動更名為 `<new>_grid3x3.csv`，無日誌遺失 |
 | R8 | 旋轉未存檔互動防護 | 將影像旋轉 90° 後直接按 `F2` 更名 | 觸發 `App_ConfirmDiscard()`：選 Yes 存檔後更名；選 Cancel 中斷更名，保留旋轉標記 `*` |
 
 ## 10. 建置調整

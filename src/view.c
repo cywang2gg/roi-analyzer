@@ -1,6 +1,7 @@
 #include "view.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -326,21 +327,30 @@ void View_DrawImagePyramid(HDC hdc, const view_t *v, const image_t *img,
     if (!nearest)
         SetBrushOrgEx(hdc, 0, 0, NULL);
     if (nearest) {
-        int sx0 = (int)(((double)(visible.left - v->off_x) * level->w) /
-                        v->draw_w);
-        int sy0 = (int)(((double)(visible.top - v->off_y) * level->h) /
-                        v->draw_h);
-        int sx1 = (int)(((double)(visible.right - v->off_x) * level->w +
-                         v->draw_w - 1) / v->draw_w);
-        int sy1 = (int)(((double)(visible.bottom - v->off_y) * level->h +
-                         v->draw_h - 1) / v->draw_h);
+        int sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1;
+        sx0 = (int)(((double)(visible.left - v->off_x) * level->w) /
+                    v->draw_w);
+        sy0 = (int)(((double)(visible.top - v->off_y) * level->h) /
+                    v->draw_h);
+        sx1 = (int)(((double)(visible.right - v->off_x) * level->w +
+                     v->draw_w - 1) / v->draw_w);
+        sy1 = (int)(((double)(visible.bottom - v->off_y) * level->h +
+                     v->draw_h - 1) / v->draw_h);
         if (sx1 > level->w) sx1 = level->w;
         if (sy1 > level->h) sy1 = level->h;
-        StretchDIBits(hdc, visible.left, visible.top,
-                      visible.right - visible.left,
-                      visible.bottom - visible.top,
-                      sx0, sy0, sx1 - sx0, sy1 - sy0,
-                      level->px, &bmi, DIB_RGB_COLORS, SRCCOPY);
+        /* Map the source subrectangle back to dest, matching compare_core.c. */
+        dx0 = v->off_x + (int)floor((double)sx0 * v->draw_w / level->w + 0.5);
+        dy0 = v->off_y + (int)floor((double)sy0 * v->draw_h / level->h + 0.5);
+        dx1 = v->off_x + (int)floor((double)sx1 * v->draw_w / level->w + 0.5);
+        dy1 = v->off_y + (int)floor((double)sy1 * v->draw_h / level->h + 0.5);
+        if (sx1 <= sx0 || sy1 <= sy0)
+            return;
+        /* Narrow the DIB to the source row band and offset the pixel pointer; YSrc is always 0, matching compare_core.c. */
+        bmi.bmiHeader.biHeight = -(sy1 - sy0);
+        StretchDIBits(hdc, dx0, dy0, dx1 - dx0, dy1 - dy0,
+                      sx0, 0, sx1 - sx0, sy1 - sy0,
+                      level->px + (size_t)sy0 * (size_t)level->pitch,
+                      &bmi, DIB_RGB_COLORS, SRCCOPY);
     } else {
         StretchDIBits(hdc, v->off_x, v->off_y, v->draw_w, v->draw_h,
                       0, 0, level->w, level->h,

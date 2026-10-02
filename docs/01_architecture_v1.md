@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v3.1 | 日期：2026-09-28 | Metric Set v2：遮罩驅動量測（Edge/Flat/Neutral/Tier）＋S/N/C/K 指標＋排名引擎＋3 視圖＋報告升級（v3.0 指標併入）
+> 版本：v3.2 | 日期：2026-10-01 | 主視窗放大繪製修正：nearest 路徑來源列帶鏡像（`YSrc` 語義）＋來源→dest 反推；並修 `View_RectToWindow` 取整相位差
 
 ## 變更歷史
+
+- **v3.2（2026-10-01）**：主視窗放大（`zoom > 1`）時 **ROI 框與影像內容錯位** 修正。**根因（headless 實驗確證）**：`View_DrawImagePyramid` 建立 `bmi` 時設 `biHeight = -level->h`（top-down DIB），卻又在 nearest 分支以 `YSrc = sy0`、高度 `sy1 - sy0` 指定**部分來源列帶**；Windows 在此組合下把 `YSrc` 當 **bottom-up** 語義處理，取到**垂直鏡像**列帶（取得 `[h - sy0 - sy1, h - sy0)`），錯位量達數十至數百**影像列**，隨 pan 位置變化；`XSrc` 語義正確故**僅垂直方向**受影響；`zoom ≤ 1` 走 `else` 分支（`sy0 = 0`、全高）故縮小時無此現象。**修法**：比照 `compare_core.c:541-580` 既有正確慣例——像素指標改為 `level->px + (size_t)sy0 * (size_t)level->pitch`、`bmi.bmiHeader.biHeight = -(sy1 - sy0)`、`YSrc` 恆為 `0`；並補 `sx1 <= sx0 || sy1 <= sy0` 跨度 guard。**併修**：nearest 分支原直接以 `visible` 當 dest 四參數，使區域比例 ≠ 全域 `scale`（誤差隨距離由左往右累積至 ~`scale` px），改為由來源子矩形**反推** dest（`dx = off + floor(sx * draw_w / level_w + 0.5)`），與 `compare_core.c` 同慣例。**驗證**：headless harness 直接驅動真實 `View_DrawImagePyramid()` 讀回 dest 像素，裁切情境由 8/8 `DRIFT` 轉為 8/8 `OK`；未裁切與 `zoom ≤ 1` 情境結果不變。**影響**：`View_DrawImagePyramid` 呼叫者僅 `view.c:283` 與 `canvas.c:377`；表格數值／`AnalyzeROI`／旋轉 ROI／比較視窗／mini 預覽／拖曳虛線框／histogram 預覽皆走影像座標或獨立映射，**不受影響**。詳見 `roi_scale_drift_architecture.md`。
 
 - **v3.1（2026-09-28）**：Metric Set v2（只做加法，v3.0 API／欄位／流程全保留）。`src/masks.h/.c` 約 380 行：Y 通道 Sobel 梯度（3×3 高斯前處理一次）；Edge（梯度中位數法自動閾值＋排除 ROI 邊界 3px）；Flat（梯度第 30 百分位＋扣除 Edge 膨脹 5px）；Neutral（5×5 平均後 Lab C*<8 且 15<L*<95）；NeutralFlat 交集；ContrastTier（沿梯度法線 ±4px 兩側 L* 中位數差分三級 <10／10–30／>30）；聯合遮罩由參考圖算一次套全組；樣本 <1% 或 <500px 回 NaN＋reason。`src/metrics_v2.h/.c` 約 520 行：S1 Edge 上 median(G/ΔL)；S2 法線剖面 10–90% 中位距離；S3 overshoot%＋undershoot；S4 分級 S1＋TR；S5 參考邊緣各級存活率；N1 Flat 內 σ_Y＋SNR；N2 殘差自相關 FWHM；N3 五段 L* 曲線＋暗部 σ；C1 Flat 內 σ_C；C2 NeutralFlat 內 σ_C＋色斑 FWHM；C3 沿用 gray_cast；K1 改 Lab C* 均值＋P95＋ΔC%（`sat_*` 欄位保留）；K2 C* 加權 Δh_ab（無參考圖 NaN）；舊 Laplacian／Tenengrad／Brenner 欄位保留（legacy，不排名）。`src/ranking.h/.c` 約 190 行：四方向正規化 0–100、relative／absolute、4 profile（balanced／detail／low_light／color）、綜合排名＋`rank_tied` 並列（2.0 分容差；已知缺口：非按指標個別 JND）。`src/views.h/.c` 約 140 行：edge_tier／noise_residual／gamma_boost 256×192 縮圖。`report.c` 擴充約 210 行：排名總表＋熱力表＋手寫 SVG 雷達＋警示區＋legacy 收合＋CSV 匯出，三視圖 Base64 內嵌，串接既有報告流程。詳見 `compare_metrics_architecture.md` §12。
 
@@ -65,7 +67,7 @@ roi-analyzer/
 │   ├── image_wic.h      # 記憶體 PNG 編碼宣告（v3.0 新增，原僅 .c）
 │   ├── settings.h/.c    # INI 持久化：監控路徑＋前綴記憶（v2.9）
 │   ├── monitor.h/.c     # 資料夾監控 worker＋self-trigger 抑制 ring（v2.9）
-│   ├── rename.h/.c      # 更名核心：校驗＋MoveFileExA＋log 連動（v2.9）
+│   ├── rename.h/.c      # 更名核心：校驗＋MoveFileExA＋CSV 連動（v2.9）
 │   ├── image_save.h/.c  # WIC PNG 原子覆寫存檔（v2.8 旋轉後存檔）
 │   ├── rotate.h/.c      # 影像旋轉＋ROI 矩形座標變換（v2.8）
 │   ├── compare.h / compare_image.c / compare_core.c
@@ -80,7 +82,7 @@ roi-analyzer/
 │   ├── histogram.h/.c # 直方圖統計（純計算，不依賴 GUI）
 │   ├── histpanel.h/.c # Histogram 面板子視窗：通道選單、繪圖、滑鼠互動
 │   ├── table.h/.c     # Grid 表格（ListView report）封裝
-│   ├── export.h/.c    # 記錄檔輸出
+│   ├── export.h/.c    # CSV 匯出
 │   ├── app.manifest   # comctl32 v6 manifest（現代控制項樣式）
 │   └── app.rc         # 資源檔：嵌入 manifest、旋轉角度對話框（v2.8）
 ├── bin/               # 輸出執行檔
@@ -217,7 +219,7 @@ extern app_t g_app;
 | roi | `ROI_Clear()`、`ROI_ClearSource()`、`ROI_Add()`、`ROI_Remove()`、`ROI_BuildGrid(n)`、`ROI_HitTest()`、`ROI_OnLDown/Move/LUp()` | 管理帶來源標籤的共用 ROI 清單、建立分區、命中測試與拖曳狀態機（見 §5） |
 | analyze | `AnalyzeROI(img, rc, out)` | 逐列以 32 位元整數累加 RGB、平方與交叉項，再併入 64 位元總和；寬度超過 66051 時使用 64 位元逐像素 fallback；Y 由 BT.601 加權項推導，Lab 使用 D65 |
 | table | `Table_Create()`、`Table_Rebuild()`、`Table_AppendRow()`、`Table_Select()`、`Table_Clear()` | 封裝頁籤控制項與 ListView report 模式；依目前頁籤篩選 ROI，欄位定義見 §7 |
-| export | `Export_Log(img, rois)`、`Export_GetPath()` | 將各來源 ROI 分別依 §8 格式追加至來源影像旁、以來源命名的記錄檔 |
+| export | `Export_Log(img, rois)`、`Export_GetPath()` | 將各來源 ROI 分別依 §8 格式追加至來源影像旁的 CSV 檔 |
 
 ## 5. 互動狀態機
 
@@ -335,29 +337,25 @@ y_j = \left\lfloor \frac{j \cdot H}{N} \right\rfloor,\quad i,j=0..N
 - 表格是呈現層；唯一資料來源為帶來源標籤的 `g_app.rois`。頁籤依來源篩選，匯出從 ROI 清單讀取，不從 ListView 取值。
 - ListView 使用單列選取；「複選」指累加建立多個 ROI，不是同時選取多列表格列。
 
-## 8. Export 記錄檔格式
+## 8. Export CSV 格式
 
-- 觸發方式：Export 按鈕、`File > Export Log` 或 `Ctrl+E`。
-- 依 ROI 來源分別輸出至來源影像所在目錄，檔名為 `<影像主檔名>_<模式>.log`，採 UTF-8 編碼及 append 追加方式。模式字串固定為手動框選的 `drag`、3×3 分區的 `grid3x3`、5×5 分區的 `grid5x5`。
-  - 例：`C:\data\test_red.png` 的三種來源分別輸出至 `C:\data\test_red_drag.log`、`C:\data\test_red_grid3x3.log`、`C:\data\test_red_grid5x5.log`。
-- Export 將目前存在的各來源 ROI 分別寫入其來源記錄檔；某來源 ROI 數量為零時不建立或修改該來源檔案。全部來源皆無 ROI 時顯示「尚無 ROI」提示。
+- 觸發方式：Export 按鈕、`File > Export CSV` 或 `Ctrl+E`。
+- 依 ROI 來源分別輸出至來源影像所在目錄，檔名為 `<影像主檔名>_<模式>.csv`，採 UTF-16LE BOM 編碼及 append 追加方式。模式字串固定為手動框選的 `drag`、3×3 分區的 `grid3x3`、5×5 分區的 `grid5x5`。
+  - 例：`C:\data\test_red.png` 的三種來源分別輸出至 `C:\data\test_red_drag.csv`、`C:\data\test_red_grid3x3.csv`、`C:\data\test_red_grid5x5.csv`。
+- Export 將目前存在的各來源 ROI 分別寫入其來源 CSV 檔；某來源 ROI 數量為零時不建立或修改該來源檔案。全部來源皆無 ROI 時顯示「尚無 ROI」提示。
 - 匯出成功後，狀態列顯示各輸出路徑；開檔或寫入失敗時顯示錯誤訊息，不回報為成功。
-- 每個來源記錄檔每次匯出各寫入一個區塊，以 `# ==== export` 開始；區塊內依該來源編號順序逐一輸出 ROI：
+- 每個來源 CSV 檔第一次寫入時以 UTF-16LE BOM（`FF FE`）開頭，不寫入 `sep=` 行；續寫時先檢查 BOM，不符合 UTF-16LE 的舊檔拒絕續寫，符合時只在新區塊前加入一個空行。每次匯出區塊以 `# ==== export` 開始，接著寫入 14 欄 tab 分隔表頭及 ROI 資料行；欄序為 `id Rm Rs Gm Gs Bm Bs Ym Ys L a b rect count`：
 
 ```text
+[UTF-16LE BOM]
 # ==== export [2026-09-26 10:00:01] image=C:\data\test_red.png size=640x480 mode=grid3x3 rois=9
-# roi 1 rect=(0,0)-(212,159) count=34080
-RGB mean=(255.00,0.00,0.00) std=(0.00,0.00,0.00)
-Y mean=76.24 std=0.00
-Lab L=53.24 a=80.11 b=67.22
-# roi 2 rect=(213,0)-(425,159) count=34080
-RGB mean=(255.00,0.00,0.00) std=(0.00,0.00,0.00)
-Y mean=76.24 std=0.00
-Lab L=53.24 a=80.11 b=67.22
+id	Rm	Rs	Gm	Gs	Bm	Bs	Ym	Ys	L	a	b	rect	count
+1	255.00	0.00	0.00	0.00	0.00	0.00	76.24	0.00	53.24	80.11	67.22	(0,0)-(212,159)	34080
+2	255.00	0.00	0.00	0.00	0.00	0.00	76.24	0.00	53.24	80.11	67.22	(213,0)-(425,159)	34080
 ...
 ```
 
-`Clear` 只清除目前表格頁籤來源的 ROI，不刪除記錄檔；`Shift+C` 或 `Edit > Clear All ROI` 清除全部來源 ROI。`Log > Open Log File` 開啟目前影像與操作模式來源對應的記錄檔；沒有目前影像或檔案不存在時顯示提示。`Log > Open Folder` 開啟目前影像所在資料夾。
+續寫到既有 `.csv` 時保留原內容，僅在新的 Export 區塊前加入空行；舊 `.log`／`.tsv` 檔不遷移且不再寫入。`Clear` 只清除目前表格頁籤來源的 ROI，不刪除 CSV 檔；`Shift+C` 或 `Edit > Clear All ROI` 清除全部來源 ROI。`CSV > Open CSV File` 開啟目前影像與操作模式來源對應的 CSV 檔；沒有目前影像或檔案不存在時顯示提示。`CSV > Open Folder` 開啟目前影像所在資料夾。
 
 ## 9. UI 版面
 
@@ -386,10 +384,10 @@ Lab L=53.24 a=80.11 b=67.22
 
 選單內容：
 
-- **File**：`Open...`、`Export Log (Ctrl+E)`、`Exit`。
+- **File**：`Open...`、`Export CSV (Ctrl+E)`、`Exit`。
 - **Mode**：`Drag [1]`、`3x3 Grid [2]`、`5x5 Grid [3]`、分隔線、`Multi Select [M]`。複選項目的勾選狀態與按鈕列核取方塊同步。
 - **Edit**：`Delete Selected ROI [Del]`、`Clear Current Tab ROI [C]`、`Clear All ROI [Shift+C]`。
-- **Log**：`Open Log File`、`Open Folder`。
+- **CSV**：`Open CSV File`、`Open Folder`。
 - **View**：`Histogram Panel [H]`（打勾項）、分隔線、`Channel: RGB [A]／Luminosity [Y]／Red [R]／Green [G]／Blue [B]`（單選打勾）、`Log Scale [L]`（打勾項）、分隔線、`Compare Files… [Ctrl+K]`、`Compare Current with Next [K]`。
 
 直方圖命令 ID 為 161～166（`IDM_HIST_RGB/_Y/_R/_G/_B/_LOG`），比較視窗命令 ID 為 155／156（`IDM_COMPARE_FILES`／`IDM_COMPARE_NEXT`）。

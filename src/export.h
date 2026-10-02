@@ -7,6 +7,7 @@
 #include "roi.h"
 
 int Export_GetPath(const image_t *img, roi_mode_t mode, char *dst, size_t cap);
-int Export_Log(const image_t *img, const roi_list_t *rois);
+int Export_Log(const image_t *img, const roi_list_t *rois,
+               char *error_path, size_t error_path_cap);
 
 #endif

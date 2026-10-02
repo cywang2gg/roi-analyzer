@@ -153,7 +153,7 @@ static DWORD move_overwrite_target(const char *target, char *backup,
     return ERROR_FILE_EXISTS;
 }
 
-static void move_related_logs(const char *old_path, const char *new_path)
+static void move_related_csv_files(const char *old_path, const char *new_path)
 {
     static const char *const modes[] = {
         "drag", "grid3x3", "grid5x5"
@@ -181,11 +181,11 @@ static void move_related_logs(const char *old_path, const char *new_path)
     for (i = 0; i < 3; i++) {
         char source[MAX_PATH], destination[MAX_PATH];
         int source_length, destination_length;
-        source_length = _snprintf(source, sizeof(source), "%s\\%.*s_%s.log",
+        source_length = _snprintf(source, sizeof(source), "%s\\%.*s_%s.csv",
                                   old_dir, (int)old_base_length, old_file,
                                   modes[i]);
         destination_length =
-            _snprintf(destination, sizeof(destination), "%s\\%.*s_%s.log",
+            _snprintf(destination, sizeof(destination), "%s\\%.*s_%s.csv",
                       new_dir, (int)new_base_length, new_file, modes[i]);
         if (source_length < 0 || source_length >= (int)sizeof(source) ||
             destination_length < 0 ||
@@ -194,13 +194,13 @@ static void move_related_logs(const char *old_path, const char *new_path)
         if (GetFileAttributesA(source) != INVALID_FILE_ATTRIBUTES &&
             !MoveFileExA(source, destination,
                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
-            OutputDebugStringA("ROI Analyzer: could not move a related ROI log file.\n");
+            OutputDebugStringA("ROI Analyzer: could not move a related ROI CSV file.\n");
             warned = TRUE;
         }
     }
     if (warned)
         MessageBoxA(GetActiveWindow(),
-                    "The image was renamed, but one or more related ROI log files could not be renamed.",
+                    "The image was renamed, but one or more related ROI CSV files could not be renamed.",
                     "Rename Image", MB_OK | MB_ICONWARNING);
 }
 
@@ -277,6 +277,6 @@ DWORD Rename_Execute(const char *old_path, const char *new_name,
         return result;
     }
     memcpy(out_new_path, target, strlen(target) + 1);
-    move_related_logs(full_old_path, target);
+    move_related_csv_files(full_old_path, target);
     return ERROR_SUCCESS;
 }
