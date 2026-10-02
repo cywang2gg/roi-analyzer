@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v3.2 | 日期：2026-10-01 | 主視窗放大繪製修正：nearest 路徑來源列帶鏡像（`YSrc` 語義）＋來源→dest 反推；並修 `View_RectToWindow` 取整相位差
+> 版本：v3.3 | 日期：2026-10-02 | 色卡偵測（YOLOv8＋ONNX Runtime）：載入後 1 秒背景偵測、洋紅框疊加、狀態列提示；詳見 `color_chart_detection_architecture.md`（v1.2 定稿）
 
 ## 變更歷史
+
+- **v3.3（2026-10-02）**：色卡偵測 v1（P1＋P2）。新增 `src/app_messages.h`（`WM_APP +104/+105` 集中管理）、`src/yolo_post.h/.c` 約 310 行（純計算零 Win32 依賴：letterbox／NCHW／YOLOv8 `[1,6,8400]` 解碼只取 class 1＋同類 NMS＋座標還原）、`src/yolo_ort.h/.c` 約 430 行（`onnxruntime.dll` 動態載入＋session 形狀檢查＋RunOptions 登記／terminate）、`src/detect.h/.c` 約 250 行（狀態機 DISABLED／IDLE／PENDING／RUNNING／DONE／FAILED＋1 秒 `IDT_DETECT_DELAY=2`＋中央載入鉤子 `App_ReplaceImage`／`App_UnloadImage`＋狀態列複用訊息區）、`src/detect_worker.h/.c` 約 440 行（常駐 `CreateThread` worker＋容量 1 job slot＋背景 session 建立／暖機＋seq 取消）。`canvas.c` 加洋紅框 overlay（影像→偵測框→ROI 框）＋Timer 轉發；`main.c` 加 `WM_APP_DETECT_DONE/INIT`、Timer 分支、`WM_DESTROY` 清理。`third_party/onnxruntime`（1.30.0：標頭＋x64 DLL 16MB）；`models/color_chart.onnx`（12MB，YOLOv8n，opset 18）＋`color_chart.json`（sha256 `ad6a508c…`）。**驗證**：單元測試 9/9、`ctest` 通過；T11 端到端以真實 `[1,6,8400]` 張量比對 Python ORT，IoU=0.9983；T1 手測 `3.png` 出框＋狀態列。詳見 `color_chart_detection_architecture.md`。
 
 - **v3.2（2026-10-01）**：主視窗放大（`zoom > 1`）時 **ROI 框與影像內容錯位** 修正。**根因（headless 實驗確證）**：`View_DrawImagePyramid` 建立 `bmi` 時設 `biHeight = -level->h`（top-down DIB），卻又在 nearest 分支以 `YSrc = sy0`、高度 `sy1 - sy0` 指定**部分來源列帶**；Windows 在此組合下把 `YSrc` 當 **bottom-up** 語義處理，取到**垂直鏡像**列帶（取得 `[h - sy0 - sy1, h - sy0)`），錯位量達數十至數百**影像列**，隨 pan 位置變化；`XSrc` 語義正確故**僅垂直方向**受影響；`zoom ≤ 1` 走 `else` 分支（`sy0 = 0`、全高）故縮小時無此現象。**修法**：比照 `compare_core.c:541-580` 既有正確慣例——像素指標改為 `level->px + (size_t)sy0 * (size_t)level->pitch`、`bmi.bmiHeader.biHeight = -(sy1 - sy0)`、`YSrc` 恆為 `0`；並補 `sx1 <= sx0 || sy1 <= sy0` 跨度 guard。**併修**：nearest 分支原直接以 `visible` 當 dest 四參數，使區域比例 ≠ 全域 `scale`（誤差隨距離由左往右累積至 ~`scale` px），改為由來源子矩形**反推** dest（`dx = off + floor(sx * draw_w / level_w + 0.5)`），與 `compare_core.c` 同慣例。**驗證**：headless harness 直接驅動真實 `View_DrawImagePyramid()` 讀回 dest 像素，裁切情境由 8/8 `DRIFT` 轉為 8/8 `OK`；未裁切與 `zoom ≤ 1` 情境結果不變。**影響**：`View_DrawImagePyramid` 呼叫者僅 `view.c:283` 與 `canvas.c:377`；表格數值／`AnalyzeROI`／旋轉 ROI／比較視窗／mini 預覽／拖曳虛線框／histogram 預覽皆走影像座標或獨立映射，**不受影響**。詳見 `roi_scale_drift_architecture.md`。
 
@@ -83,9 +85,17 @@ roi-analyzer/
 │   ├── histpanel.h/.c # Histogram 面板子視窗：通道選單、繪圖、滑鼠互動
 │   ├── table.h/.c     # Grid 表格（ListView report）封裝
 │   ├── export.h/.c    # CSV 匯出
+│   ├── app_messages.h # WM_APP 自訂訊息集中管理（+104/+105 偵測，v3.3）
+│   ├── yolo_post.h/.c # letterbox／NCHW／YOLOv8 解碼／NMS／座標還原，純計算零 Win32 依賴（v3.3）
+│   ├── yolo_ort.h/.c  # onnxruntime.dll 動態載入＋session＋Run（v3.3）
+│   ├── detect.h/.c    # 偵測狀態機＋Timer＋UI 公開 API（v3.3）
+│   ├── detect_worker.h/.c # 常駐 worker＋job slot＋取消（v3.3）
 │   ├── app.manifest   # comctl32 v6 manifest（現代控制項樣式）
 │   └── app.rc         # 資源檔：嵌入 manifest、旋轉角度對話框（v2.8）
-├── bin/               # 輸出執行檔
+├── bin/               # 輸出執行檔（版控；不含 *.exe／*.log／*.png／*.ini，見 .gitignore）
+│   └── models/        # 部署用模型副本（color_chart.onnx＋json，v3.3）
+├── models/            # 色卡模型正本（color_chart.onnx 12MB＋color_chart.json，v3.3，版控）
+├── third_party/       # 第三方（版控）：onnxruntime 1.30.0 標頭＋x64 DLL＋授權（v3.3）
 ├── build/             # CMake 建置目錄（不納入版控）
 └── docs/
     ├── 01_architecture_v1.md  # 本文件
@@ -97,7 +107,7 @@ roi-analyzer/
     └── 02_verification.md     # 驗證文件
 ```
 
-預估約 12,900 行 C 程式碼（主程式約 6,100＋比較模組約 3,500＋旋轉／存檔約 340＋監控／更名／設定約 1,000＋指標／FFT／報告約 1,400＋Metric Set v2 約 1,450），無第三方依賴；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
+預估約 14,300 行 C 程式碼（主程式約 6,100＋比較模組約 3,500＋旋轉／存檔約 340＋監控／更名／設定約 1,000＋指標／FFT／報告約 1,400＋Metric Set v2 約 1,450＋色卡偵測約 1,400），第三方僅 ONNX Runtime（動態載入，不連結）；使用 Win32、WIC、GDI+ 與系統內建 Common Controls。
 
 ## 3. 核心資料結構
 

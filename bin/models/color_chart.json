@@ -1,0 +1,19 @@
+{
+    "source_pt": "C:\\Users\\fr583\\OneDrive - \u570b\u7acb\u4e2d\u592e\u5927\u5b78\\\u6587\u4ef6\\GitHub\\ColorChartv2\\Yolov8n-colorchecker.pt",
+    "source_pt_sha256": "ad6a508c004471dde3e905d1bbd298956280b9ea3397f2ce21a264bf5ac32597",
+    "ultralytics_version": "8.4.171",
+    "yolo_family": "v8",
+    "task": "detect",
+    "imgsz": 640,
+    "names": [
+        "122",
+        "color-chart"
+    ],
+    "v1_use_class": 1,
+    "output_shape": [
+        1,
+        6,
+        8400
+    ],
+    "opset": 18
+}
