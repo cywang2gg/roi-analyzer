@@ -8,3 +8,7 @@ bin/*.png
 bin/*.ini
 # v3.3: exe 同目錄的 onnxruntime.dll 由 third_party 部署副本取得，不進版控
 bin/onnxruntime.dll
+# cc locate v1.2: exe 同目錄的 OpenCV + msys 執行期 DLL 由 third_party/opencv-4.12 部署取得，不進版控
+bin/*.dll
+# 測試圖副本（正本在 ColorChartv2/CropFullsamples），不進版控
+bin/CropFullsamples/
