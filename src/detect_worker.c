@@ -18,6 +18,7 @@ static BOOL g_worker_lock_initialized;
 static BOOL g_worker_started;
 static HWND g_hwnd_notify;
 static detect_job_t *g_job_slot;
+static locate_job_t *g_locate_job_slot;
 static yolo_ort_session_t *g_session;
 static OrtRunOptions *g_active_run_options;
 static int64_t g_qpc_frequency;
@@ -36,6 +37,14 @@ static void free_job(detect_job_t *job)
 {
     if (job != NULL) {
         free(job->rgb);
+        free(job);
+    }
+}
+
+static void free_locate_job(locate_job_t *job)
+{
+    if (job != NULL) {
+        cc_image_free(&job->image);
         free(job);
     }
 }
@@ -222,6 +231,46 @@ static detect_result_t *process_job(detect_job_t *job, float *input)
     return result;
 }
 
+static cc_locate_result_t *process_locate_job(locate_job_t *job)
+{
+    cc_locate_result_t *result;
+    cc_image_view_t image;
+    LARGE_INTEGER started = { 0 }, finished = { 0 };
+    int run_status;
+
+    if (cancelled(job->seq))
+        return NULL;
+    result = (cc_locate_result_t *)calloc(1, sizeof(*result));
+    if (result == NULL)
+        return NULL;
+    image.pixels = job->image.pixels;
+    image.width = job->image.width;
+    image.height = job->image.height;
+    image.stride = job->image.stride;
+    image.channels = job->image.channels;
+    QueryPerformanceCounter(&started);
+    run_status = cc_locate_run(image, job->origin_x, job->origin_y,
+                               job->rx, job->ry, result);
+    if (cancelled(job->seq)) {
+        free(result);
+        return NULL;
+    }
+    result->seq = (int32_t)job->seq;
+    result->status = run_status;
+    QueryPerformanceCounter(&finished);
+    result->elapsed_ms = g_qpc_frequency != 0 ?
+        (double)(finished.QuadPart - started.QuadPart) * 1000.0 /
+            (double)g_qpc_frequency : 0.0;
+    return result;
+}
+
+static void post_locate_allocation_failure(LONG seq)
+{
+    if (!PostMessageA(g_hwnd_notify, WM_APP_LOCATE_DONE,
+                      LOCATE_RESULT_ALLOCATION_FAILURE, (LPARAM)seq))
+        OutputDebugStringA("ROI Analyzer: could not post locate allocation failure.\n");
+}
+
 static DWORD WINAPI detect_worker(void *parameter)
 {
     char model_path[MAX_PATH];
@@ -286,7 +335,9 @@ static DWORD WINAPI detect_worker(void *parameter)
 
     for (;;) {
         detect_job_t *job;
+        locate_job_t *locate_job;
         detect_result_t *result;
+        cc_locate_result_t *locate_result;
         LONG job_seq;
 
         wait_result = WaitForMultipleObjects(2, wait_handles, FALSE, INFINITE);
@@ -295,27 +346,48 @@ static DWORD WINAPI detect_worker(void *parameter)
         EnterCriticalSection(&g_worker_lock);
         job = g_job_slot;
         g_job_slot = NULL;
+        locate_job = g_locate_job_slot;
+        g_locate_job_slot = NULL;
         LeaveCriticalSection(&g_worker_lock);
-        if (job == NULL)
+        if (job == NULL && locate_job == NULL)
             continue;
-        if (cancelled(job->seq)) {
-            free_job(job);
-            continue;
+        if (job != NULL) {
+            if (cancelled(job->seq)) {
+                free_job(job);
+            } else {
+                job_seq = job->seq;
+                result = process_job(job, input);
+                free_job(job);
+                if (result == NULL) {
+                    if (!cancelled(job_seq))
+                        post_result_allocation_failure(job_seq);
+                } else if (cancelled(result->seq) ||
+                           !PostMessageA(g_hwnd_notify, WM_APP_DETECT_DONE,
+                                         0, (LPARAM)result)) {
+                    if (!cancelled(result->seq))
+                        OutputDebugStringA("ROI Analyzer: could not post detection result.\n");
+                    free(result);
+                }
+            }
         }
-        job_seq = job->seq;
-        result = process_job(job, input);
-        free_job(job);
-        if (result == NULL) {
-            if (!cancelled(job_seq))
-                post_result_allocation_failure(job_seq);
-            continue;
-        }
-        if (cancelled(result->seq) ||
-            !PostMessageA(g_hwnd_notify, WM_APP_DETECT_DONE, 0,
-                          (LPARAM)result)) {
-            if (!cancelled(result->seq))
-                OutputDebugStringA("ROI Analyzer: could not post detection result.\n");
-            free(result);
+        if (locate_job != NULL) {
+            if (cancelled(locate_job->seq)) {
+                free_locate_job(locate_job);
+            } else {
+                job_seq = locate_job->seq;
+                locate_result = process_locate_job(locate_job);
+                free_locate_job(locate_job);
+                if (locate_result == NULL) {
+                    if (!cancelled(job_seq))
+                        post_locate_allocation_failure(job_seq);
+                } else if (cancelled((LONG)locate_result->seq) ||
+                           !PostMessageA(g_hwnd_notify, WM_APP_LOCATE_DONE,
+                                         0, (LPARAM)locate_result)) {
+                    if (!cancelled((LONG)locate_result->seq))
+                        OutputDebugStringA("ROI Analyzer: could not post locate result.\n");
+                    free(locate_result);
+                }
+            }
         }
     }
     free(input);
@@ -398,9 +470,29 @@ BOOL DetectWorker_Submit(detect_job_t *job)
     return TRUE;
 }
 
+BOOL DetectWorker_SubmitLocate(locate_job_t *job)
+{
+    locate_job_t *old_job;
+
+    if (!g_worker_started || job == NULL)
+        return FALSE;
+    EnterCriticalSection(&g_worker_lock);
+    old_job = g_locate_job_slot;
+    g_locate_job_slot = job;
+    if (!SetEvent(g_job_event)) {
+        g_locate_job_slot = old_job;
+        LeaveCriticalSection(&g_worker_lock);
+        return FALSE;
+    }
+    LeaveCriticalSection(&g_worker_lock);
+    free_locate_job(old_job);
+    return TRUE;
+}
+
 void DetectWorker_CancelAll(void)
 {
     detect_job_t *job;
+    locate_job_t *locate_job;
     char error[128];
 
     if (!g_worker_lock_initialized)
@@ -408,11 +500,14 @@ void DetectWorker_CancelAll(void)
     EnterCriticalSection(&g_worker_lock);
     job = g_job_slot;
     g_job_slot = NULL;
+    locate_job = g_locate_job_slot;
+    g_locate_job_slot = NULL;
     if (g_session != NULL && g_active_run_options != NULL &&
         yolo_ort_terminate(g_session, error, sizeof(error)) != 0)
         OutputDebugStringA("ROI Analyzer: could not terminate inference run.\n");
     LeaveCriticalSection(&g_worker_lock);
     free_job(job);
+    free_locate_job(locate_job);
 }
 
 void DetectWorker_Stop(void)

@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include "cc_locate.h"
 #include "yolo_post.h"
 
 #define IDT_DETECT_DELAY 2
@@ -40,8 +41,11 @@ void Detect_OnTimer(const unsigned char *bgra, int width, int height,
 void Detect_OnInitResult(detect_init_result_t *result);
 void Detect_OnResult(detect_result_t *result);
 void Detect_OnResultAllocationFailure(LONG seq);
+void Detect_OnLocateResult(cc_locate_result_t *result);
+void Detect_OnLocateAllocationFailure(LONG seq);
 LONG Detect_ImageSeq(void);
 void Detect_GetStatusText(char *text, size_t capacity);
+void Detect_GetLocateStatusText(char *text, size_t capacity);
 size_t Detect_GetResults(const yolo_detection_t **detections);
 void Detect_Shutdown(void);
 

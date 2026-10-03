@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include "cc_locate.h"
 #include "yolo_post.h"
 
 typedef struct {
@@ -13,8 +14,18 @@ typedef struct {
     unsigned char *rgb;
 } detect_job_t;
 
+typedef struct {
+    LONG seq;
+    cc_image_t image;
+    int origin_x;
+    int origin_y;
+    float rx;
+    float ry;
+} locate_job_t;
+
 BOOL DetectWorker_Start(HWND hwnd_notify, char *error, size_t error_capacity);
 BOOL DetectWorker_Submit(detect_job_t *job);
+BOOL DetectWorker_SubmitLocate(locate_job_t *job);
 void DetectWorker_CancelAll(void);
 void DetectWorker_Stop(void);
 

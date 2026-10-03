@@ -58,6 +58,7 @@
 #define IDM_HIST_G     164
 #define IDM_HIST_B     165
 #define IDM_HIST_LOG   166
+#define IDM_SHOW_PATCH_GRID 169
 #define IDC_CANVAS     1001
 #define IDC_TABLE      1002
 #define IDC_EXPORT     1003
@@ -248,6 +249,7 @@ void App_UpdateStatus(void)
     char time[128];
     char browsing[32];
     char detect_status[256];
+    char locate_status[256];
     const char *message;
     POINT screen, client, image_point;
 
@@ -277,6 +279,9 @@ void App_UpdateStatus(void)
     Detect_GetStatusText(detect_status, sizeof(detect_status));
     if (detect_status[0] != '\0')
         message = detect_status;
+    Detect_GetLocateStatusText(locate_status, sizeof(locate_status));
+    if (locate_status[0] != '\0')
+        message = locate_status;
     if (g_browsing) {
         if (copy_utf8_to_acp(browsing, sizeof(browsing), "瀏覽中…"))
             message = browsing;
@@ -391,6 +396,8 @@ static void App_UpdateImageMenu(void)
     CheckMenuItem(g_menu_view, IDM_METRICS_SETTINGS, MF_BYCOMMAND |
                   (Compare_MetricsStage2Enabled() ?
                    MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_menu_view, IDM_SHOW_PATCH_GRID, MF_BYCOMMAND |
+                  (g_app.show_patch_grid ? MF_CHECKED : MF_UNCHECKED));
 }
 
 static void App_RotateOrthogonal(int steps)
@@ -2298,6 +2305,19 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
                           (Compare_MetricsStage2Enabled() ?
                            MF_CHECKED : MF_UNCHECKED));
         }
+        else if (id == IDM_SHOW_PATCH_GRID) {
+            locate_options_t options;
+            g_app.show_patch_grid = !g_app.show_patch_grid;
+            options.enabled = g_app.locate_enabled;
+            options.show_grid = g_app.show_patch_grid;
+            CheckMenuItem(g_menu_view, IDM_SHOW_PATCH_GRID,
+                          MF_BYCOMMAND | (g_app.show_patch_grid ?
+                                          MF_CHECKED : MF_UNCHECKED));
+            if (!Settings_SaveLocateOptions(&options))
+                OutputDebugStringA("ROI Analyzer: could not save locate settings.\n");
+            if (g_app.hwnd_canvas != NULL)
+                InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+        }
         else if (id == IDM_ROT90)
             App_RotateOrthogonal(1);
         else if (id == IDM_ROT180)
@@ -2420,6 +2440,13 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             Detect_OnResult((detect_result_t *)lparam);
         App_UpdateStatus();
         return 0;
+    case WM_APP_LOCATE_DONE:
+        if (wparam == LOCATE_RESULT_ALLOCATION_FAILURE)
+            Detect_OnLocateAllocationFailure((LONG)lparam);
+        else
+            Detect_OnLocateResult((cc_locate_result_t *)lparam);
+        App_UpdateStatus();
+        return 0;
     case WM_TIMER:
         if (wparam == PROMPT_DRAIN_TIMER) {
             KillTimer(hwnd, PROMPT_DRAIN_TIMER);
@@ -2498,6 +2525,9 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(csv, MF_STRING, IDM_OPENCSV, "Open CSV File");
     AppendMenuA(csv, MF_STRING, IDM_FOLDER, "Open Folder");
     AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HISTOGRAM, "Histogram Panel\tH");
+    AppendMenuA(view, MF_STRING |
+                (g_app.show_patch_grid ? MF_CHECKED : MF_UNCHECKED),
+                IDM_SHOW_PATCH_GRID, "Show Patch Grid");
     AppendMenuA(view, MF_SEPARATOR, 0, NULL);
     AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HIST_RGB, "Channel: RGB\tA");
     AppendMenuA(view, MF_STRING, IDM_HIST_Y, "Luminosity (Y)\tY");
@@ -2550,6 +2580,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     int result;
     DWORD s_nav_done_tick;
     HRESULT com_result;
+    locate_options_t locate_options;
 
     (void)previous;
     memset(&g_app, 0, sizeof(g_app));
@@ -2563,6 +2594,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     g_app.mode = MODE_DRAG;
     g_app.table_page = MODE_DRAG;
     g_app.show_hist = TRUE;
+    (void)Settings_LoadLocateOptions(&locate_options);
+    g_app.locate_enabled = locate_options.enabled;
+    g_app.show_patch_grid = locate_options.show_grid;
     g_app.view.zoom = 1.0f;
     QueryPerformanceFrequency(&g_qpc_frequency);
     ROI_Init(&g_app.rois, &g_app.drag);

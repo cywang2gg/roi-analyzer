@@ -95,3 +95,38 @@ BOOL Settings_SaveLastRenamePrefix(const char *prefix)
     return ini[0] &&
            WritePrivateProfileStringA("Rename", "LastRenamePrefix", prefix, ini);
 }
+
+BOOL Settings_LoadLocateOptions(locate_options_t *options)
+{
+    char ini[MAX_PATH];
+
+    if (options == NULL)
+        return FALSE;
+    options->enabled = TRUE;
+    options->show_grid = TRUE;
+    Settings_GetIniPath(ini, sizeof(ini));
+    if (ini[0] == '\0')
+        return FALSE;
+    options->enabled =
+        GetPrivateProfileIntA("locate", "enabled", 1, ini) != 0;
+    options->show_grid =
+        GetPrivateProfileIntA("locate", "show_grid", 1, ini) != 0;
+    return TRUE;
+}
+
+BOOL Settings_SaveLocateOptions(const locate_options_t *options)
+{
+    char ini[MAX_PATH];
+    const char *enabled;
+    const char *show_grid;
+
+    if (options == NULL)
+        return FALSE;
+    Settings_GetIniPath(ini, sizeof(ini));
+    if (ini[0] == '\0')
+        return FALSE;
+    enabled = options->enabled ? "1" : "0";
+    show_grid = options->show_grid ? "1" : "0";
+    return WritePrivateProfileStringA("locate", "enabled", enabled, ini) &&
+           WritePrivateProfileStringA("locate", "show_grid", show_grid, ini);
+}

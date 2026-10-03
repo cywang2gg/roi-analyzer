@@ -6,6 +6,7 @@
 
 #include "app.h"
 #include "app_messages.h"
+#include "cc_cv.h"
 #include "detect_worker.h"
 #include "yolo_post.h"
 
@@ -16,6 +17,15 @@ static yolo_detection_t g_results[DETECT_MAX_RESULTS];
 static size_t g_result_count;
 static double g_elapsed_ms;
 static char g_error[128];
+static int g_locate_state;
+static char g_locate_error[64];
+
+enum {
+    LOCATE_IDLE,
+    LOCATE_RUNNING,
+    LOCATE_DONE,
+    LOCATE_FAILED
+};
 
 static LONG current_seq(void)
 {
@@ -35,6 +45,72 @@ static void clear_results(void)
     g_error[0] = '\0';
 }
 
+static void clear_locate_result(void)
+{
+    memset(&g_app.locate_result, 0, sizeof(g_app.locate_result));
+    g_app.locate_result_valid = FALSE;
+    g_locate_state = LOCATE_IDLE;
+    g_locate_error[0] = '\0';
+}
+
+static void submit_locate(const yolo_detection_t *detection, LONG seq)
+{
+    cc_image_view_t source;
+    cc_image_t crop;
+    locate_job_t *job;
+    cc_box_t box;
+    int origin_x;
+    int origin_y;
+    float rx;
+    float ry;
+
+    if (!g_app.locate_enabled || detection == NULL ||
+        !g_app.img.valid || seq != current_seq()) {
+        return;
+    }
+    source.pixels = g_app.img.px;
+    source.width = g_app.img.w;
+    source.height = g_app.img.h;
+    source.stride = g_app.img.pitch;
+    source.channels = 4;
+    box.xc = (detection->x1 + detection->x2) * 0.5f;
+    box.yc = (detection->y1 + detection->y2) * 0.5f;
+    box.width = detection->x2 - detection->x1;
+    box.height = detection->y2 - detection->y1;
+    memset(&crop, 0, sizeof(crop));
+    if (cc_crop_scale(source, box, 1.2f, 400, &crop, &origin_x, &origin_y,
+                      &rx, &ry) != 0) {
+        g_locate_state = LOCATE_FAILED;
+        (void)snprintf(g_locate_error, sizeof(g_locate_error), "%s",
+                       "crop_failed");
+        return;
+    }
+    job = (locate_job_t *)calloc(1, sizeof(*job));
+    if (job == NULL) {
+        cc_image_free(&crop);
+        g_locate_state = LOCATE_FAILED;
+        (void)snprintf(g_locate_error, sizeof(g_locate_error), "%s",
+                       "out_of_memory");
+        return;
+    }
+    job->seq = seq;
+    job->image = crop;
+    job->origin_x = origin_x;
+    job->origin_y = origin_y;
+    job->rx = rx;
+    job->ry = ry;
+    if (!DetectWorker_SubmitLocate(job)) {
+        cc_image_free(&job->image);
+        free(job);
+        g_locate_state = LOCATE_FAILED;
+        (void)snprintf(g_locate_error, sizeof(g_locate_error), "%s",
+                       "queue_failed");
+        return;
+    }
+    g_locate_state = LOCATE_RUNNING;
+    g_locate_error[0] = '\0';
+}
+
 BOOL Detect_Init(HWND hwnd_notify)
 {
     char error[128] = "";
@@ -42,6 +118,7 @@ BOOL Detect_Init(HWND hwnd_notify)
     g_state = DETECT_IDLE;
     g_pending_seq = current_seq();
     clear_results();
+    clear_locate_result();
     if (!DetectWorker_Start(hwnd_notify, error, sizeof(error))) {
         g_state = DETECT_DISABLED;
         (void)snprintf(g_error, sizeof(g_error), "%s",
@@ -49,6 +126,11 @@ BOOL Detect_Init(HWND hwnd_notify)
                        "Could not start detection worker");
         g_error[sizeof(g_error) - 1] = '\0';
         return FALSE;
+    }
+    /* OpenCV is LoadLibrary-loaded (see D2): missing DLL only disables
+       locate, the main program keeps running. */
+    if (!cc_cv_load()) {
+        OutputDebugStringA("ROI Analyzer: OpenCV unavailable, patch locate disabled.\n");
     }
     return TRUE;
 }
@@ -60,6 +142,7 @@ void Detect_OnImageUnloading(void)
     (void)InterlockedIncrement(&g_image_seq);
     DetectWorker_CancelAll();
     clear_results();
+    clear_locate_result();
     if (g_app.hwnd_canvas != NULL)
         InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
     if (g_state != DETECT_DISABLED)
@@ -180,7 +263,46 @@ void Detect_OnResult(detect_result_t *result)
         g_elapsed_ms = result->elapsed_ms;
         g_state = DETECT_FAILED;
     }
+    if (result->status == 0 && g_result_count > 0U)
+        submit_locate(&g_results[0], seq);
     free(result);
+    if (g_app.hwnd_canvas != NULL)
+        InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+}
+
+void Detect_OnLocateResult(cc_locate_result_t *result)
+{
+    if (result == NULL)
+        return;
+    if ((LONG)result->seq != current_seq()) {
+        free(result);
+        return;
+    }
+    g_app.locate_result = *result;
+    g_app.locate_result_valid = TRUE;
+    if (result->status == 0 && result->success) {
+        g_locate_state = LOCATE_DONE;
+        g_locate_error[0] = '\0';
+    } else {
+        g_locate_state = LOCATE_FAILED;
+        (void)snprintf(g_locate_error, sizeof(g_locate_error), "%s",
+                       result->reason[0] != '\0' ? result->reason :
+                       "locate_failed");
+        g_locate_error[sizeof(g_locate_error) - 1] = '\0';
+    }
+    free(result);
+    if (g_app.hwnd_canvas != NULL)
+        InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+}
+
+void Detect_OnLocateAllocationFailure(LONG seq)
+{
+    if (seq != current_seq())
+        return;
+    g_locate_state = LOCATE_FAILED;
+    (void)snprintf(g_locate_error, sizeof(g_locate_error), "%s",
+                   "out_of_memory");
+    g_locate_error[sizeof(g_locate_error) - 1] = '\0';
     if (g_app.hwnd_canvas != NULL)
         InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
 }
@@ -230,6 +352,31 @@ void Detect_GetStatusText(char *text, size_t capacity)
     text[capacity - 1] = '\0';
 }
 
+void Detect_GetLocateStatusText(char *text, size_t capacity)
+{
+    if (text == NULL || capacity == 0)
+        return;
+    text[0] = '\0';
+    switch (g_locate_state) {
+    case LOCATE_RUNNING:
+        (void)snprintf(text, capacity, "Locating patches...");
+        break;
+    case LOCATE_DONE:
+        (void)snprintf(text, capacity, "Located %u patches (%.0f ms)",
+                       (unsigned)g_app.locate_result.valid_count,
+                       g_app.locate_result.elapsed_ms);
+        break;
+    case LOCATE_FAILED:
+        (void)snprintf(text, capacity, "Locate failed: %s",
+                       g_locate_error[0] != '\0' ?
+                       g_locate_error : "unknown_error");
+        break;
+    case LOCATE_IDLE:
+        break;
+    }
+    text[capacity - 1] = '\0';
+}
+
 size_t Detect_GetResults(const yolo_detection_t **detections)
 {
     if (detections != NULL)
@@ -243,6 +390,7 @@ void Detect_Shutdown(void)
 
     Detect_OnImageUnloading();
     DetectWorker_Stop();
+    cc_cv_unload();
     while (g_app.hwnd_main != NULL &&
            PeekMessageA(&message, g_app.hwnd_main, WM_APP_DETECT_DONE,
                         WM_APP_DETECT_DONE, PM_REMOVE)) {
@@ -253,4 +401,10 @@ void Detect_Shutdown(void)
            PeekMessageA(&message, g_app.hwnd_main, WM_APP_DETECT_INIT,
                         WM_APP_DETECT_INIT, PM_REMOVE))
         free((void *)message.lParam);
+    while (g_app.hwnd_main != NULL &&
+           PeekMessageA(&message, g_app.hwnd_main, WM_APP_LOCATE_DONE,
+                        WM_APP_LOCATE_DONE, PM_REMOVE)) {
+        if (message.wParam != LOCATE_RESULT_ALLOCATION_FAILURE)
+            free((void *)message.lParam);
+    }
 }

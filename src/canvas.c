@@ -169,6 +169,40 @@ static void draw_detection_overlay(HDC hdc)
     }
 }
 
+static void cc_overlay_draw(HDC hdc)
+{
+    size_t i;
+
+    if (!g_app.img.valid || !g_app.show_patch_grid ||
+        !g_app.locate_result_valid ||
+        (LONG)g_app.locate_result.seq != Detect_ImageSeq() ||
+        !g_app.locate_result.success || g_app.view.scale <= 0.0f) {
+        return;
+    }
+    for (i = 0; i < CC_ROI_COUNT; ++i) {
+        const cc_roi_t *roi = &g_app.locate_result.rois[i];
+        RECT image_rect;
+        RECT window_rect;
+        RECT outer_rect;
+
+        if (!roi->valid)
+            continue;
+        image_rect.left = (LONG)roi->display_x1;
+        image_rect.top = (LONG)roi->display_y1;
+        image_rect.right = (LONG)roi->display_x2;
+        image_rect.bottom = (LONG)roi->display_y2;
+        View_RectToWindow(&g_app.view, image_rect, &window_rect);
+        outer_rect.left = window_rect.left - 1;
+        outer_rect.top = window_rect.top - 1;
+        outer_rect.right = window_rect.right + 1;
+        outer_rect.bottom = window_rect.bottom + 1;
+        draw_outline(hdc, &outer_rect, RGB(0, 0, 0), 1, PS_SOLID);
+        draw_outline(hdc, &window_rect, RGB(0, 255, 255), 1, PS_SOLID);
+        draw_label(hdc, window_rect.left + 2, window_rect.top + 2,
+                   roi->id, FALSE);
+    }
+}
+
 BOOL Canvas_Register(HINSTANCE instance)
 {
     WNDCLASSA wc;
@@ -429,6 +463,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
             else
                 View_DrawImage(mem, &g_app.view, &g_app.img);
             draw_detection_overlay(mem);
+            cc_overlay_draw(mem);
             draw_roi_overlay(mem);
         }
         BitBlt(hdc, rc.left, rc.top, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);

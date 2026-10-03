@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include "image.h"
+#include "cc_locate.h"
 #include "histpanel.h"
 #include "filelist.h"
 #include "roi.h"
@@ -31,6 +32,10 @@ typedef struct {
     roi_mode_t table_page;
     BOOL multi;
     BOOL show_hist;
+    BOOL locate_enabled;
+    BOOL show_patch_grid;
+    BOOL locate_result_valid;
+    cc_locate_result_t locate_result;
     BOOL analysis_stale;
     BOOL is_modified;
     unsigned int img_gen;
