@@ -33,7 +33,8 @@ typedef struct {
     HWND status;
     HWND track[2];
     HWND label[2];
-    HWND grp[3];
+    HWND grp[4];
+    HWND btn_ana[3];
     HWND sync;
     HWND pan_left;
     HWND pan_right;
@@ -46,6 +47,11 @@ typedef struct {
     HWND progress;
     HWND tooltip;
     cmp_image_t *image[2];
+    cmp_image_t *ana[2];
+    cmp_metric_t met[2];
+    RECT met_src[2];
+    cmp_ana_t mode;
+    int best;
     metrics_async_job_t *metrics_job;
     cmp_view_t view[2];
     BOOL swapped;
@@ -74,6 +80,117 @@ static const char V2_OVERLAY_CLASS[] = "RoiCmpOverlay";
 
 static void v2_snapshot(cmp_v2_t *state, BOOL copy_only);
 static BOOL v2_run_metrics(cmp_v2_t *state);
+static void v2_metrics_update(cmp_v2_t *state);
+static void v2_metrics_schedule(cmp_v2_t *state);
+static BOOL v2_set_mode(cmp_v2_t *state, cmp_ana_t mode);
+static void v2_update_status(cmp_v2_t *state);
+
+static cmp_image_t *v2_disp(const cmp_v2_t *state, int index)
+{
+    return (state->mode != CMP_ANA_NONE && state->ana[index]) ?
+           state->ana[index] : state->image[index];
+}
+
+static void v2_sync_ana_buttons(cmp_v2_t *state)
+{
+    int k;
+    for (k = 0; k < 3; k++)
+        SendMessageA(state->btn_ana[k], BM_SETCHECK,
+                     (state->mode == (cmp_ana_t)(CMP_ANA_SHARP + k)) ?
+                     BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void v2_metrics_update(cmp_v2_t *state)
+{
+    RECT full;
+    int k;
+    ZeroMemory(&full, sizeof(full));
+    if (!state->overlay || !GetClientRect(state->overlay, &full))
+        return;
+    for (k = 0; k < 2; k++) {
+        RECT src;
+        if (state->mode == CMP_ANA_NONE ||
+            !CmpAna_VisibleSrcImage(state->image[k], &state->view[k],
+                                    full.right, full.bottom, &src)) {
+            ZeroMemory(&state->met[k], sizeof(state->met[k]));
+            SetRectEmpty(&state->met_src[k]);
+        } else if (state->met[k].mode != state->mode ||
+                   !EqualRect(&src, &state->met_src[k])) {
+            if (!CmpAna_Measure(state->image[k], state->mode, &src,
+                                &state->met[k]))
+                OutputDebugStringA("ROI Analyzer: comparison metric measurement failed.\n");
+            state->met_src[k] = src;
+        }
+    }
+    state->best = CmpAna_BestIndex(state->met, 2);
+}
+
+static void v2_metrics_schedule(cmp_v2_t *state)
+{
+    if (state->mode != CMP_ANA_NONE &&
+        !SetTimer(state->hwnd, CMP_TID_METRIC, CMP_ANA_DEBOUNCE_MS, NULL))
+        OutputDebugStringA("ROI Analyzer: could not schedule comparison metrics.\n");
+}
+
+static BOOL v2_set_mode(cmp_v2_t *state, cmp_ana_t mode)
+{
+    cmp_image_t *acquired[2] = { NULL, NULL };
+    HCURSOR previous_cursor = NULL;
+    BOOL wait_cursor = FALSE;
+    int k;
+    if (!state || mode < CMP_ANA_NONE || mode >= CMP_ANA_COUNT)
+        return FALSE;
+    if (state->mode == mode)
+        mode = CMP_ANA_NONE;
+    if (mode != CMP_ANA_NONE) {
+        for (k = 0; k < 2; k++)
+            if (!state->image[k]->ana[mode] &&
+                !state->image[k]->ana_failed[mode])
+                wait_cursor = TRUE;
+        if (wait_cursor)
+            previous_cursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
+        for (k = 0; k < 2; k++) {
+            char progress[64];
+            if (wait_cursor) {
+                _snprintf(progress, sizeof(progress), "Analyzing %d/2...",
+                          k + 1);
+                progress[sizeof(progress) - 1] = '\0';
+                SetWindowTextA(state->status, progress);
+                UpdateWindow(state->status);
+            }
+            acquired[k] = CmpAna_Acquire(state->image[k], mode);
+            if (!acquired[k]) {
+                int j;
+                for (j = 0; j < k; j++)
+                    CmpAna_Release(state->image[j], mode);
+                if (wait_cursor)
+                    SetCursor(previous_cursor);
+                v2_update_status(state);
+                v2_sync_ana_buttons(state);
+                MessageBoxA(state->hwnd,
+                            "Analysis could not be allocated. The current mode was kept.",
+                            "Compare Analysis", MB_OK | MB_ICONERROR);
+                return FALSE;
+            }
+        }
+    }
+    KillTimer(state->hwnd, CMP_TID_METRIC);
+    for (k = 0; k < 2; k++) {
+        if (state->mode != CMP_ANA_NONE)
+            CmpAna_Release(state->image[k], state->mode);
+        state->ana[k] = acquired[k];
+        ZeroMemory(&state->met[k], sizeof(state->met[k]));
+        SetRectEmpty(&state->met_src[k]);
+    }
+    state->mode = mode;
+    v2_sync_ana_buttons(state);
+    v2_metrics_update(state);
+    if (wait_cursor)
+        SetCursor(previous_cursor);
+    v2_update_status(state);
+    InvalidateRect(state->overlay, NULL, FALSE);
+    return TRUE;
+}
 
 static double v2_clamp(double value, double minimum, double maximum)
 {
@@ -112,6 +229,7 @@ static void v2_release(cmp_v2_t *state)
 {
     if (!state)
         return;
+    KillTimer(state->hwnd, CMP_TID_METRIC);
     if (state->metrics_job) {
         Metrics_CancelAsync(state->metrics_job);
         Metrics_ReleaseAsync(state->metrics_job);
@@ -122,6 +240,11 @@ static void v2_release(cmp_v2_t *state)
     CmpReg_Remove(state->hwnd);
     state->registered = FALSE;
     v2_free_backbuffer(state);
+    if (state->ana[0])
+        CmpAna_Release(state->image[0], state->mode);
+    if (state->ana[1])
+        CmpAna_Release(state->image[1], state->mode);
+    state->ana[0] = state->ana[1] = NULL;
     CmpImage_Unref(state->image[0]);
     CmpImage_Unref(state->image[1]);
     state->image[0] = state->image[1] = NULL;
@@ -312,6 +435,7 @@ static void v2_fit_views(cmp_v2_t *state)
                     state->image[i]->img.h, client.right, client.bottom, 0.95);
     state->need_fit = FALSE;
     v2_sync_controls(state);
+    v2_metrics_schedule(state);
 }
 
 static void v2_reset_all(cmp_v2_t *state)
@@ -330,6 +454,12 @@ static void v2_reset_all(cmp_v2_t *state)
 static BOOL v2_create_tooltip(cmp_v2_t *state)
 {
     TOOLINFOA info;
+    int i;
+    const char *texts[3] = {
+        "Show the Sharp Sobel edge analysis.",
+        "Show the Texture high-pass analysis.",
+        "Show the Neutral Lab color analysis."
+    };
     state->tooltip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
         WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, CW_USEDEFAULT, state->hwnd, NULL,
@@ -346,6 +476,20 @@ static BOOL v2_create_tooltip(cmp_v2_t *state)
         DestroyWindow(state->tooltip);
         state->tooltip = NULL;
         return FALSE;
+    }
+    for (i = 0; i < 3; i++) {
+        ZeroMemory(&info, sizeof(info));
+        info.cbSize = sizeof(info);
+        info.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        info.hwnd = state->hwnd;
+        info.uId = (UINT_PTR)state->btn_ana[i];
+        info.lpszText = (LPSTR)texts[i];
+        if (!SendMessageA(state->tooltip, TTM_ADDTOOLA, 0,
+                          (LPARAM)&info)) {
+            DestroyWindow(state->tooltip);
+            state->tooltip = NULL;
+            return FALSE;
+        }
     }
     return TRUE;
 }
@@ -411,9 +555,9 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
         cmp_view_t right_view = state->view[right_index];
         left_view.zoom *= scale;
         right_view.zoom *= scale;
-        Cmp_Blit(dc, state->image[left_index], &left_view, &viewport,
+        Cmp_Blit(dc, v2_disp(state, left_index), &left_view, &viewport,
                  &left_clip);
-        Cmp_Blit(dc, state->image[right_index], &right_view, &viewport,
+        Cmp_Blit(dc, v2_disp(state, right_index), &right_view, &viewport,
                  &right_clip);
     }
     if (client.right > 0) {
@@ -442,19 +586,35 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
         DeleteObject(yellow);
     }
     {
-        char left_label[MAX_PATH + 32], right_label[MAX_PATH + 32];
+        char left_label[MAX_PATH + 180], right_label[MAX_PATH + 180];
+        char left_metric[128], right_metric[128];
         RECT label;
         HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
         SetBkMode(dc, OPAQUE);
         SetBkColor(dc, RGB(0, 0, 0));
         SetTextColor(dc, RGB(255, 255, 255));
         old_font = SelectObject(dc, font ? font : Cmp_UiFont());
-        _snprintf(left_label, sizeof(left_label), "A: %s %.0f%%",
-                  state->image[left_index]->name,
-                  state->view[left_index].zoom * 100.0);
-        _snprintf(right_label, sizeof(right_label), "B: %s %.0f%%",
-                  state->image[right_index]->name,
-                  state->view[right_index].zoom * 100.0);
+        left_metric[0] = '\0';
+        right_metric[0] = '\0';
+        if (state->mode != CMP_ANA_NONE) {
+            CmpAna_Format(&state->met[left_index], left_metric,
+                          sizeof(left_metric));
+            CmpAna_Format(&state->met[right_index], right_metric,
+                          sizeof(right_metric));
+            _snprintf(left_label, sizeof(left_label), "A: %s | %s %.0f%%",
+                      left_metric, state->image[left_index]->name,
+                      state->view[left_index].zoom * 100.0);
+            _snprintf(right_label, sizeof(right_label), "B: %s | %s %.0f%%",
+                      right_metric, state->image[right_index]->name,
+                      state->view[right_index].zoom * 100.0);
+        } else {
+            _snprintf(left_label, sizeof(left_label), "A: %s %.0f%%",
+                      state->image[left_index]->name,
+                      state->view[left_index].zoom * 100.0);
+            _snprintf(right_label, sizeof(right_label), "B: %s %.0f%%",
+                      state->image[right_index]->name,
+                      state->view[right_index].zoom * 100.0);
+        }
         left_label[sizeof(left_label) - 1] = '\0';
         right_label[sizeof(right_label) - 1] = '\0';
         if (flags & CMP_RENDER_SNAPSHOT) {
@@ -467,6 +627,9 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
             label.bottom = 32;
         }
         FillRect(dc, &label, black);
+        SetTextColor(dc, state->mode != CMP_ANA_NONE &&
+                     left_index == state->best ? RGB(255, 220, 0) :
+                     RGB(255, 255, 255));
         DrawTextA(dc, left_label, -1, &label,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                   DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -478,9 +641,13 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
             label.right = client.right - 8;
         }
         FillRect(dc, &label, black);
+        SetTextColor(dc, state->mode != CMP_ANA_NONE &&
+                     right_index == state->best ? RGB(255, 220, 0) :
+                     RGB(255, 255, 255));
         DrawTextA(dc, right_label, -1, &label,
                   DT_RIGHT | DT_VCENTER | DT_SINGLELINE |
                   DT_END_ELLIPSIS | DT_NOPREFIX);
+        SetTextColor(dc, RGB(255, 255, 255));
         DeleteObject(black);
         if (old_font)
             SelectObject(dc, old_font);
@@ -613,19 +780,22 @@ static void v2_snapshot(cmp_v2_t *state, BOOL copy_only)
 static void v2_layout(cmp_v2_t *state)
 {
     RECT client;
-    int width, gz, zoom_w, gx1, pan_w, gx2, act_w, track_w, button_w;
-    int lower_w;
+    int width, gz, zoom_w, gx1, pan_w, gx2, act_w, gx3, ana_w;
+    int track_w, button_w, lower_w, ana_button_w, usable;
     if (!GetClientRect(state->hwnd, &client))
         return;
     width = client.right;
-    /* Proportional bar: Zoom takes half the window, Pan Sync and Actions
-       split the remaining half. */
     gz = 4;
-    zoom_w = width / 2 - 2;
+    usable = width - 20;
+    if (usable < 0)
+        usable = 0;
+    zoom_w = usable * 2 / 5;
     gx1 = gz + zoom_w + 4;
-    pan_w = (width - gx1 - 4) / 2 - 2;
+    pan_w = usable / 5;
     gx2 = gx1 + pan_w + 4;
-    act_w = width - gx2 - 4;
+    act_w = usable / 5;
+    gx3 = gx2 + act_w + 4;
+    ana_w = usable - zoom_w - pan_w - act_w;
     MoveWindow(state->overlay, 0, V2_TOP_H, width,
                client.bottom - V2_TOP_H - V2_BOTTOM_H, TRUE);
     MoveWindow(state->status, 0, client.bottom - V2_BOTTOM_H,
@@ -633,6 +803,7 @@ static void v2_layout(cmp_v2_t *state)
     MoveWindow(state->grp[0], gz, 2, zoom_w, V2_GROUP_H, TRUE);
     MoveWindow(state->grp[1], gx1, 2, pan_w, V2_GROUP_H, TRUE);
     MoveWindow(state->grp[2], gx2, 2, act_w, V2_GROUP_H, TRUE);
+    MoveWindow(state->grp[3], gx3, 2, ana_w, V2_GROUP_H, TRUE);
     /* Zoom tracks stretch with the half-width box. */
     track_w = zoom_w - 45 - 10;
     if (track_w < 80)
@@ -660,6 +831,14 @@ static void v2_layout(cmp_v2_t *state)
                lower_w, 18, TRUE);
     MoveWindow(state->metrics_button, gx2 + 18 + lower_w * 2, 44,
                lower_w, 18, TRUE);
+    ana_button_w = (ana_w - 24) / 3;
+    if (ana_button_w < 1)
+        ana_button_w = 1;
+    MoveWindow(state->btn_ana[0], gx3 + 6, 44, ana_button_w, 18, TRUE);
+    MoveWindow(state->btn_ana[1], gx3 + 12 + ana_button_w, 44,
+               ana_button_w, 18, TRUE);
+    MoveWindow(state->btn_ana[2], gx3 + 18 + ana_button_w * 2, 44,
+               ana_button_w, 18, TRUE);
 }
 
 static void v2_zoom_both(cmp_v2_t *state, int direction, int x, int y)
@@ -672,6 +851,7 @@ static void v2_zoom_both(cmp_v2_t *state, int direction, int x, int y)
     for (i = 0; i < 2; i++)
         CmpView_ZoomAt(&state->view[i], next, x, y,
                        client.right, client.bottom);
+    v2_metrics_schedule(state);
     v2_sync_controls(state);
     v2_update_status(state);
     InvalidateRect(state->overlay, NULL, FALSE);
@@ -702,6 +882,8 @@ static LRESULT CALLBACK V2OverlayProc(HWND hwnd, UINT message, WPARAM wparam,
         if (state) {
             if (state->need_fit && LOWORD(lparam) > 0 && HIWORD(lparam) > 0)
                 v2_fit_views(state);
+            else
+                v2_metrics_schedule(state);
             InvalidateRect(hwnd, NULL, FALSE);
             v2_update_status(state);
         }
@@ -750,6 +932,7 @@ static LRESULT CALLBACK V2OverlayProc(HWND hwnd, UINT message, WPARAM wparam,
                 int i;
                 for (i = first; i < last; i++)
                     CmpView_Pan(&state->view[i], dx, dy);
+                v2_metrics_schedule(state);
                 state->last = point;
                 InvalidateRect(hwnd, NULL, FALSE);
             }
@@ -802,6 +985,7 @@ static LRESULT CALLBACK V2OverlayProc(HWND hwnd, UINT message, WPARAM wparam,
                     for (i = 0; i < 2; i++)
                         CmpView_ZoomAt(&state->view[i], next, point.x,
                                        point.y, width, height);
+                    v2_metrics_schedule(state);
                     v2_sync_controls(state);
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
@@ -844,6 +1028,9 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         state->grp[2] = CreateWindowExA(0, "BUTTON", "Actions",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 481, 2, 350, V2_GROUP_H,
             hwnd, NULL, instance, NULL);
+        state->grp[3] = CreateWindowExA(0, "BUTTON", "Analyze",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 835, 2, 220, V2_GROUP_H,
+            hwnd, NULL, instance, NULL);
         state->label[0] = CreateWindowExA(0, "STATIC", "L: 100%",
             WS_CHILD | WS_VISIBLE, 12, 20, 32, 22, hwnd, NULL, instance, NULL);
         state->track[0] = CreateWindowExA(0, TRACKBAR_CLASSA, "",
@@ -881,6 +1068,15 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 850, 43, 86, 20,
             hwnd, (HMENU)V2_ID_INFO, instance, NULL);
+        state->btn_ana[0] = CreateWindowExA(0, "BUTTON", "Sharp",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            842, 43, 58, 20, hwnd, (HMENU)V2_ID_ANA_SHARP, instance, NULL);
+        state->btn_ana[1] = CreateWindowExA(0, "BUTTON", "Texture",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            902, 43, 66, 20, hwnd, (HMENU)V2_ID_ANA_TEXTURE, instance, NULL);
+        state->btn_ana[2] = CreateWindowExA(0, "BUTTON", "Neutral",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            970, 43, 66, 20, hwnd, (HMENU)V2_ID_ANA_NEUTRAL, instance, NULL);
         state->overlay = CreateWindowExA(0, V2_OVERLAY_CLASS, "",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, V2_TOP_H, 0, 0,
             hwnd, NULL, instance, state);
@@ -888,12 +1084,14 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 4, 0, 0, V2_BOTTOM_H,
             hwnd, NULL, instance, NULL);
         if (!state->grp[0] || !state->grp[1] || !state->grp[2] ||
+            !state->grp[3] ||
             !state->label[0] ||
             !state->label[1] || !state->track[0] || !state->track[1] ||
             !state->sync || !state->pan_left || !state->pan_right ||
             !state->swap_button || !state->split_button ||
             !state->reset_button || !state->snapshot_button ||
             !state->metrics_button || !state->info_bar ||
+            !state->btn_ana[0] || !state->btn_ana[1] || !state->btn_ana[2] ||
             !state->overlay || !state->status)
             return -1;
         if (!v2_create_tooltip(state))
@@ -901,6 +1099,7 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         SendMessageA(state->grp[0], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->grp[1], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->grp[2], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->grp[3], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         for (i = 0; i < 2; i++) {
             SendMessageA(state->track[i], TBM_SETRANGE, TRUE,
                          MAKELONG(2, 800));
@@ -927,6 +1126,12 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
                      (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->info_bar, WM_SETFONT,
                      (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->btn_ana[0], WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->btn_ana[1], WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->btn_ana[2], WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->status, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->pan_left, BM_SETCHECK, BST_CHECKED, 0);
         SendMessageA(state->split_button, BM_SETCHECK, BST_CHECKED, 0);
@@ -944,7 +1149,7 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *limits = (MINMAXINFO *)lparam;
-        limits->ptMinTrackSize.x = 760;
+        limits->ptMinTrackSize.x = 900;
         limits->ptMinTrackSize.y = 420;
         return 0;
     }
@@ -989,6 +1194,15 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
                     SendMessageA(state->info_bar, BM_GETCHECK, 0, 0) ==
                     BST_CHECKED;
                 break;
+            case V2_ID_ANA_SHARP:
+                v2_set_mode(state, CMP_ANA_SHARP);
+                break;
+            case V2_ID_ANA_TEXTURE:
+                v2_set_mode(state, CMP_ANA_TEXTURE);
+                break;
+            case V2_ID_ANA_NEUTRAL:
+                v2_set_mode(state, CMP_ANA_NEUTRAL);
+                break;
             default:
                 break;
             }
@@ -1009,6 +1223,7 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             v2_sync_controls(state);
             v2_update_status(state);
             InvalidateRect(state->overlay, NULL, FALSE);
+            v2_metrics_schedule(state);
             return 0;
         }
         break;
@@ -1021,6 +1236,7 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             return 0;
         {
         BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        BOOL alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (wparam == 'M' && ctrl) {
             v2_run_metrics(state);
@@ -1073,6 +1289,14 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             v2_reset_all(state);
             return 1;
         }
+        if (!ctrl && !alt &&
+            (wparam == 'E' || wparam == 'T' || wparam == 'N')) {
+            cmp_ana_t mode = wparam == 'E' ? CMP_ANA_SHARP :
+                             (wparam == 'T' ? CMP_ANA_TEXTURE :
+                                              CMP_ANA_NEUTRAL);
+            v2_set_mode(state, mode);
+            return 1;
+        }
         if (wparam == VK_ADD || wparam == VK_OEM_PLUS ||
             wparam == VK_SUBTRACT || wparam == VK_OEM_MINUS) {
             if (ctrl)
@@ -1088,6 +1312,14 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         }
     case CMPM_METRICS:
         return state ? v2_run_metrics(state) : FALSE;
+    case WM_TIMER:
+        if (state && wparam == CMP_TID_METRIC) {
+            KillTimer(hwnd, CMP_TID_METRIC);
+            v2_metrics_update(state);
+            InvalidateRect(state->overlay, NULL, FALSE);
+            return 0;
+        }
+        break;
     case WM_APP_METRICS_DONE:
         if (state && state->metrics_job == (metrics_async_job_t *)wparam) {
             Metrics_CloseProgress(state->progress);
@@ -1143,7 +1375,8 @@ BOOL CompareV2_Register(HINSTANCE instance)
     return TRUE;
 }
 
-HWND CompareV2_Open(cmp_image_t *left, cmp_image_t *right)
+HWND CompareV2_OpenMode(cmp_image_t *left, cmp_image_t *right,
+                        cmp_ana_t mode)
 {
     cmp_v2_t *state;
     HWND hwnd;
@@ -1151,7 +1384,8 @@ HWND CompareV2_Open(cmp_image_t *left, cmp_image_t *right)
     HMONITOR monitor;
     MONITORINFO info;
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT, width = 1200, height = 800;
-    if (!left || !right || !left->img.valid || !right->img.valid)
+    if (!left || !right || !left->img.valid || !right->img.valid ||
+        mode < CMP_ANA_NONE || mode >= CMP_ANA_COUNT)
         return NULL;
     state = (cmp_v2_t *)calloc(1, sizeof(*state));
     if (!state)
@@ -1186,5 +1420,12 @@ HWND CompareV2_Open(cmp_image_t *left, cmp_image_t *right)
     state->registered = TRUE;
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+    if (mode != CMP_ANA_NONE)
+        v2_set_mode(state, mode);
     return hwnd;
+}
+
+HWND CompareV2_Open(cmp_image_t *left, cmp_image_t *right)
+{
+    return CompareV2_OpenMode(left, right, CMP_ANA_NONE);
 }

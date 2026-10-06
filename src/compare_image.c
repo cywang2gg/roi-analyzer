@@ -65,6 +65,22 @@ cmp_image_t *CmpImage_FromImage(const image_t *src)
     return image;
 }
 
+cmp_image_t *CmpImage_Adopt(image_t *src, const char *name)
+{
+    cmp_image_t *image;
+    if (!src || !src->valid || !src->px)
+        return NULL;
+    image = (cmp_image_t *)calloc(1, sizeof(*image));
+    if (!image)
+        return NULL;
+    image->img = *src;
+    ZeroMemory(src, sizeof(*src));
+    image->refs = 1;
+    image->is_derived = TRUE;
+    lstrcpynA(image->name, name ? name : "", MAX_PATH);
+    return image;
+}
+
 cmp_image_t *CmpImage_Ref(cmp_image_t *image)
 {
     if (image)
@@ -74,13 +90,27 @@ cmp_image_t *CmpImage_Ref(cmp_image_t *image)
 
 void CmpImage_Unref(cmp_image_t *image)
 {
+    int m;
+    BOOL is_derived;
     if (!image)
         return;
     if (InterlockedDecrement(&image->refs) == 0) {
+        is_derived = image->is_derived;
+        for (m = CMP_ANA_NONE + 1; m < CMP_ANA_COUNT; m++) {
+#ifdef _DEBUG
+            if (image->ana_users[m] != 0)
+                OutputDebugStringA("CmpImage_Unref: ana_users leak\n");
+#endif
+            if (image->ana[m]) {
+                CmpImage_Unref(image->ana[m]);
+                image->ana[m] = NULL;
+            }
+        }
         ViewPyr_Free(&image->pyr);
         Image_Free(&image->img);
         free(image);
-        InterlockedDecrement(&s_live_images);
+        if (!is_derived)
+            InterlockedDecrement(&s_live_images);
     }
 }
 

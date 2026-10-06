@@ -16,6 +16,7 @@ add_executable(roi_analyzer
     src/histogram.c
     src/histpanel.c
     src/compare_image.c
+    src/compare_analysis.c
     src/compare_core.c
     src/compare_snap.c
     src/compare_v1.c

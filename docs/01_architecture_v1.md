@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v3.3 | 日期：2026-10-02 | 色卡偵測（YOLOv8＋ONNX Runtime）：載入後 1 秒背景偵測、洋紅框疊加、狀態列提示；詳見 `color_chart_detection_architecture.md`（v1.2 定稿）
+> 版本：v3.4 | 日期：2026-10-05 | 比較視窗分析模式（Sharp／Texture／Neutral）：三顆 PUSHLIKE 切換鈕（E/T/N），衍生分析圖＋可見區數值＋最佳標示；詳見 `compare_analysis_modes_architecture.md`（v1.0 可執行定稿）。色卡偵測（YOLOv8＋ONNX Runtime）：載入後 1 秒背景偵測、洋紅框疊加、狀態列提示；詳見 `color_chart_detection_architecture.md`（v1.2 定稿）。色卡 24 patch 定位：OpenCV C API（LoadLibrary 動態載入）＋直擺支援（grid 泛化＋標準編號換算）；詳見 `cc_patch_locate_architecture.md`（v1.2）
 
 ## 變更歷史
+
+- **v3.4（2026-10-05）**：比較視窗分析模式 v1.0。新增 `src/compare_analysis.c` 約 560 行（LUT＋三種分析圖：Sobel L1 灰階／5×5 高通殘差＋強邊暗藍／中性 Lab ×4 增益＋塗黑 mask；`CmpAna_Measure` 可見來源矩形取樣上限 2^20；`CmpAna_VisibleSrcImage` 組既有 `VisibleRect＋ScreenToImage`；前向 Lab 調 `analyze.c rgb_to_lab_f` 單一真實源）。`compare.h` ＋約 70 行（`cmp_ana_t`／`cmp_metric_t`／`CMP_ANA_*` 常數；V1 鈕 ID 4105–4107、V2 鈕 ID 4211–4213；`CompareV2_OpenMode` 包裝）。`compare_image.c` ＋約 35 行（`CmpImage_Adopt` 搬移＋`Unref` 連帶釋放＋衍生圖不計 `LiveCount`）。`compare_v1.c` ＋約 270 行（工具列 Sharp/Texture/Neutral 三鈕＋120ms 去彈跳計時器＋狀態帶 `* 指標`＋黃字最佳＋`v1_open_v2` 傳 mode）。`compare_v2.c` ＋約 280 行（Analyze 第 4 群組＋比例 Zoom 2/5＋最小寬 760→900＋A:/B: 標籤改指標＋Swap 跟底片）。`main.c` 零改動。**驗證**：4 檔零警告、`ctest` 2/2、手測三模式＋E/T/N＋再按回 NONE＋V1→V2 帶模式。詳見 `compare_analysis_modes_architecture.md`。
 
 - **v3.3（2026-10-02）**：色卡偵測 v1（P1＋P2）。新增 `src/app_messages.h`（`WM_APP +104/+105` 集中管理）、`src/yolo_post.h/.c` 約 310 行（純計算零 Win32 依賴：letterbox／NCHW／YOLOv8 `[1,6,8400]` 解碼只取 class 1＋同類 NMS＋座標還原）、`src/yolo_ort.h/.c` 約 430 行（`onnxruntime.dll` 動態載入＋session 形狀檢查＋RunOptions 登記／terminate）、`src/detect.h/.c` 約 250 行（狀態機 DISABLED／IDLE／PENDING／RUNNING／DONE／FAILED＋1 秒 `IDT_DETECT_DELAY=2`＋中央載入鉤子 `App_ReplaceImage`／`App_UnloadImage`＋狀態列複用訊息區）、`src/detect_worker.h/.c` 約 440 行（常駐 `CreateThread` worker＋容量 1 job slot＋背景 session 建立／暖機＋seq 取消）。`canvas.c` 加洋紅框 overlay（影像→偵測框→ROI 框）＋Timer 轉發；`main.c` 加 `WM_APP_DETECT_DONE/INIT`、Timer 分支、`WM_DESTROY` 清理。`third_party/onnxruntime`（1.30.0：標頭＋x64 DLL 16MB）；`models/color_chart.onnx`（12MB，YOLOv8n，opset 18）＋`color_chart.json`（sha256 `ad6a508c…`）。**驗證**：單元測試 9/9、`ctest` 通過；T11 端到端以真實 `[1,6,8400]` 張量比對 Python ORT，IoU=0.9983；T1 手測 `3.png` 出框＋狀態列。詳見 `color_chart_detection_architecture.md`。
 
@@ -78,6 +80,7 @@ roi-analyzer/
 │   ├── compare_v1.c   # V1 並排視窗（2～4 張：1×2／3×1／2×2，Lock 同步）
 │   ├── compare_v2.c   # V2 分割線視窗（疊加、Swap、各自倍率、像素讀值）
 │   ├── compare_snap.c # Snapshot：DIB 離屏重繪、WIC PNG 編碼、CF_BITMAP 剪貼簿、資訊列
+│   ├── compare_analysis.c # 分析模式：LUT＋Sharp/Texture/Neutral 分析圖＋取樣量測（v3.4）
 │   ├── view.h/.c      # 縮放、金字塔繪製與視窗／影像座標換算
 │   ├── roi.h/.c       # ROI 清單、拖曳狀態機與 3×3／5×5 分區
 │   ├── analyze.h/.c   # mean／std 與 Lab 計算

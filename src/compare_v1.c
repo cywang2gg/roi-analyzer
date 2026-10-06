@@ -20,6 +20,9 @@
 
 typedef struct {
     cmp_image_t *image;
+    cmp_image_t *ana;
+    cmp_metric_t met;
+    RECT met_src;
     cmp_view_t view;
     RECT cell;
     RECT image_rect;
@@ -34,12 +37,16 @@ typedef struct {
     HWND v2;
     HWND snapshot;
     HWND metrics;
+    HWND btn_ana[3];
     HWND progress;
     HWND info_bar;
     HWND message;
     HWND tooltip;
     cmp_cell_t cells[CMP_MAX_CELLS];
     int count;
+    cmp_ana_t mode;
+    int best;
+    BOOL res_mixed;
     metrics_async_job_t *metrics_job;
     BOOL locked;
     BOOL show_info;
@@ -65,6 +72,114 @@ void Compare_SetFont(HFONT font);
 static void v1_fit_all(cmp_v1_t *state);
 static void v1_snapshot(cmp_v1_t *state, BOOL copy_only);
 static BOOL v1_run_metrics(cmp_v1_t *state);
+static void v1_metrics_update(cmp_v1_t *state);
+static void v1_metrics_schedule(cmp_v1_t *state);
+static BOOL v1_set_mode(cmp_v1_t *state, cmp_ana_t mode);
+static void v1_update_message(cmp_v1_t *state);
+
+static cmp_image_t *v1_disp(const cmp_v1_t *state, int i)
+{
+    const cmp_cell_t *cell = &state->cells[i];
+    return (state->mode != CMP_ANA_NONE && cell->ana) ?
+           cell->ana : cell->image;
+}
+
+static void v1_sync_ana_buttons(cmp_v1_t *state)
+{
+    int k;
+    for (k = 0; k < 3; k++)
+        SendMessageA(state->btn_ana[k], BM_SETCHECK,
+                     (state->mode == (cmp_ana_t)(CMP_ANA_SHARP + k)) ?
+                     BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void v1_metrics_update(cmp_v1_t *state)
+{
+    cmp_metric_t all[CMP_MAX_CELLS];
+    int i;
+    state->res_mixed = FALSE;
+    for (i = 0; i < state->count; i++) {
+        cmp_cell_t *cell = &state->cells[i];
+        int view_w = cell->image_rect.right - cell->image_rect.left;
+        int view_h = cell->image_rect.bottom - cell->image_rect.top;
+        RECT src;
+        if (cell->image->img.w != state->cells[0].image->img.w ||
+            cell->image->img.h != state->cells[0].image->img.h)
+            state->res_mixed = TRUE;
+        if (state->mode == CMP_ANA_NONE || !cell->ana ||
+            !CmpAna_VisibleSrcImage(cell->image, &cell->view,
+                                    view_w, view_h, &src)) {
+            ZeroMemory(&cell->met, sizeof(cell->met));
+            SetRectEmpty(&cell->met_src);
+        } else if (cell->met.mode != state->mode ||
+                   !EqualRect(&src, &cell->met_src)) {
+            if (!CmpAna_Measure(cell->image, state->mode, &src, &cell->met))
+                OutputDebugStringA("ROI Analyzer: comparison metric measurement failed.\n");
+            cell->met_src = src;
+        }
+        all[i] = cell->met;
+    }
+    state->best = CmpAna_BestIndex(all, state->count);
+    if (state->res_mixed && state->mode != CMP_ANA_NEUTRAL)
+        state->best = -1;
+}
+
+static void v1_metrics_schedule(cmp_v1_t *state)
+{
+    if (state->mode != CMP_ANA_NONE &&
+        !SetTimer(state->hwnd, CMP_TID_METRIC, CMP_ANA_DEBOUNCE_MS, NULL))
+        OutputDebugStringA("ROI Analyzer: could not schedule comparison metrics.\n");
+}
+
+static BOOL v1_set_mode(cmp_v1_t *state, cmp_ana_t mode)
+{
+    cmp_image_t *acquired[CMP_MAX_CELLS] = { NULL };
+    HCURSOR previous_cursor;
+    int i;
+    if (!state || mode < CMP_ANA_NONE || mode >= CMP_ANA_COUNT)
+        return FALSE;
+    if (state->mode == mode)
+        mode = CMP_ANA_NONE;
+    previous_cursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
+    if (mode != CMP_ANA_NONE) {
+        for (i = 0; i < state->count; i++) {
+            char progress[64];
+            _snprintf(progress, sizeof(progress), "Analyzing %d/%d...",
+                      i + 1, state->count);
+            progress[sizeof(progress) - 1] = '\0';
+            SetWindowTextA(state->message, progress);
+            UpdateWindow(state->message);
+            acquired[i] = CmpAna_Acquire(state->cells[i].image, mode);
+            if (!acquired[i]) {
+                int j;
+                for (j = 0; j < i; j++)
+                    CmpAna_Release(state->cells[j].image, mode);
+                SetCursor(previous_cursor);
+                v1_update_message(state);
+                v1_sync_ana_buttons(state);
+                MessageBoxA(state->hwnd,
+                            "Analysis could not be allocated. The current mode was kept.",
+                            "Compare Analysis", MB_OK | MB_ICONERROR);
+                return FALSE;
+            }
+        }
+    }
+    KillTimer(state->hwnd, CMP_TID_METRIC);
+    for (i = 0; i < state->count; i++) {
+        if (state->mode != CMP_ANA_NONE)
+            CmpAna_Release(state->cells[i].image, state->mode);
+        state->cells[i].ana = acquired[i];
+        ZeroMemory(&state->cells[i].met, sizeof(state->cells[i].met));
+        SetRectEmpty(&state->cells[i].met_src);
+    }
+    state->mode = mode;
+    v1_sync_ana_buttons(state);
+    v1_metrics_update(state);
+    SetCursor(previous_cursor);
+    v1_update_message(state);
+    InvalidateRect(state->grid, NULL, FALSE);
+    return TRUE;
+}
 
 static cmp_v1_t *v1_state(HWND hwnd)
 {
@@ -90,6 +205,7 @@ static void v1_release(cmp_v1_t *state)
     int i;
     if (!state)
         return;
+    KillTimer(state->hwnd, CMP_TID_METRIC);
     if (state->metrics_job) {
         Metrics_CancelAsync(state->metrics_job);
         Metrics_ReleaseAsync(state->metrics_job);
@@ -101,6 +217,9 @@ static void v1_release(cmp_v1_t *state)
     state->registered = FALSE;
     v1_free_backbuffer(state);
     for (i = 0; i < state->count; i++) {
+        if (state->cells[i].ana)
+            CmpAna_Release(state->cells[i].image, state->mode);
+        state->cells[i].ana = NULL;
         CmpImage_Unref(state->cells[i].image);
         state->cells[i].image = NULL;
     }
@@ -231,6 +350,7 @@ static void v1_layout(cmp_v1_t *state)
                                state->cells[i].image_rect.bottom -
                                    state->cells[i].image_rect.top);
     }
+    v1_metrics_schedule(state);
 }
 
 static void v1_fit_all(cmp_v1_t *state)
@@ -267,6 +387,7 @@ static void v1_fit_all(cmp_v1_t *state)
                         cell->image_rect.bottom - cell->image_rect.top, 1.0);
         }
     }
+    v1_metrics_schedule(state);
     InvalidateRect(state->grid, NULL, FALSE);
 }
 
@@ -312,23 +433,36 @@ static void v1_render(cmp_v1_t *state, HDC dc, int width, int height,
         char close_text[] = "X";
         int view_w = cell->image_rect.right - cell->image_rect.left;
         int view_h = cell->image_rect.bottom - cell->image_rect.top;
-        Cmp_Blit(dc, cell->image, &cell->view,
+        Cmp_Blit(dc, v1_disp(state, i), &cell->view,
                  &cell->image_rect, &cell->image_rect);
         FillRect(dc, &cell->status_rect,
                  (HBRUSH)GetStockObject(BLACK_BRUSH));
-        _snprintf(label, sizeof(label), "%d: %s | %.0f%% | %dx%d | %dx%d",
-                  i + 1, cell->image->name, cell->view.zoom * 100.0,
-                  (int)(cell->image->img.w * cell->view.zoom),
-                  (int)(cell->image->img.h * cell->view.zoom),
-                  cell->image->img.w, cell->image->img.h);
+        if (state->mode != CMP_ANA_NONE) {
+            char metric[128];
+            CmpAna_Format(&cell->met, metric, sizeof(metric));
+            _snprintf(label, sizeof(label), "%s%s | %s | %.0f%%",
+                      i == state->best ? "* " : "", metric,
+                      cell->image->name, cell->view.zoom * 100.0);
+        } else {
+            _snprintf(label, sizeof(label),
+                      "%d: %s | %.0f%% | %dx%d | %dx%d",
+                      i + 1, cell->image->name, cell->view.zoom * 100.0,
+                      (int)(cell->image->img.w * cell->view.zoom),
+                      (int)(cell->image->img.h * cell->view.zoom),
+                      cell->image->img.w, cell->image->img.h);
+        }
         label[sizeof(label) - 1] = '\0';
         {
             RECT text_rect = cell->status_rect;
             text_rect.left += 5;
             text_rect.right -= 25;
+            SetTextColor(dc, state->mode != CMP_ANA_NONE &&
+                         i == state->best ? RGB(255, 220, 0) :
+                         RGB(245, 245, 245));
             DrawTextA(dc, label, -1, &text_rect,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                       DT_END_ELLIPSIS | DT_NOPREFIX);
+            SetTextColor(dc, RGB(245, 245, 245));
         }
         if (!(flags & CMP_RENDER_SNAPSHOT) && view_w > 0 && view_h > 0) {
             HBRUSH close_brush = CreateSolidBrush(RGB(150, 35, 35));
@@ -402,20 +536,33 @@ static void v1_render_snapshot(cmp_v1_t *state, HDC dc, int width, int height,
         image_rect = scaled_cell.image_rect;
         status_rect = scaled_cell.status_rect;
         view.zoom *= scale;
-        Cmp_Blit(dc, cell->image, &view, &image_rect, &image_rect);
+        Cmp_Blit(dc, v1_disp(state, i), &view, &image_rect, &image_rect);
         FillRect(dc, &status_rect, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        _snprintf(label, sizeof(label), "%d: %s | %.0f%% | %dx%d | %dx%d",
-                  i + 1, cell->image->name, cell->view.zoom * 100.0,
-                  (int)(cell->image->img.w * cell->view.zoom),
-                  (int)(cell->image->img.h * cell->view.zoom),
-                  cell->image->img.w, cell->image->img.h);
+        if (state->mode != CMP_ANA_NONE) {
+            char metric[128];
+            CmpAna_Format(&cell->met, metric, sizeof(metric));
+            _snprintf(label, sizeof(label), "%s%s | %s | %.0f%%",
+                      i == state->best ? "* " : "", metric,
+                      cell->image->name, cell->view.zoom * 100.0);
+        } else {
+            _snprintf(label, sizeof(label),
+                      "%d: %s | %.0f%% | %dx%d | %dx%d",
+                      i + 1, cell->image->name, cell->view.zoom * 100.0,
+                      (int)(cell->image->img.w * cell->view.zoom),
+                      (int)(cell->image->img.h * cell->view.zoom),
+                      cell->image->img.w, cell->image->img.h);
+        }
         label[sizeof(label) - 1] = '\0';
         text_rect = status_rect;
         text_rect.left += Snap_Round(5.0 * scale);
         text_rect.right -= Snap_Round(25.0 * scale);
+        SetTextColor(dc, state->mode != CMP_ANA_NONE &&
+                     i == state->best ? RGB(255, 220, 0) :
+                     RGB(245, 245, 245));
         DrawTextA(dc, label, -1, &text_rect,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                   DT_END_ELLIPSIS | DT_NOPREFIX);
+        SetTextColor(dc, RGB(245, 245, 245));
     }
     if (state->count > 1) {
         int pen_width = Snap_Round(scale);
@@ -609,6 +756,7 @@ static void v1_zoom_at(cmp_v1_t *state, int source, double zoom,
                        cell->image_rect.bottom - cell->image_rect.top);
     }
     v1_clamp_all(state);
+    v1_metrics_schedule(state);
     InvalidateRect(state->grid, NULL, FALSE);
 }
 
@@ -640,6 +788,7 @@ static void v1_wheel_lock(cmp_v1_t *state, int source, POINT point,
         CmpView_ClampEdges(&cell->view, cell->image->img.w,
                            cell->image->img.h, width, height);
     }
+    v1_metrics_schedule(state);
     InvalidateRect(state->grid, NULL, FALSE);
 }
 
@@ -656,7 +805,7 @@ static void v1_add_dropped(cmp_v1_t *state, HDROP drop)
 {
     UINT count = DragQueryFileW(drop, 0xffffffffu, NULL, 0);
     UINT index;
-    int added = 0, skipped = 0, limit_reached = 0;
+    int added = 0, skipped = 0, limit_reached = 0, analysis_failed = 0;
     HCURSOR old_cursor = SetCursor(LoadCursor(NULL, IDC_WAIT));
     for (index = 0; index < count; index++) {
         wchar_t wide[MAX_PATH];
@@ -696,7 +845,16 @@ static void v1_add_dropped(cmp_v1_t *state, HDROP drop)
             skipped++;
             continue;
         }
-        state->cells[state->count++].image = image;
+        state->cells[state->count].image = image;
+        if (state->mode != CMP_ANA_NONE) {
+            state->cells[state->count].ana =
+                CmpAna_Acquire(image, state->mode);
+            if (!state->cells[state->count].ana) {
+                state->cells[state->count].met.mode = state->mode;
+                analysis_failed = 1;
+            }
+        }
+        state->count++;
         added++;
     }
     SetCursor(old_cursor);
@@ -706,6 +864,7 @@ static void v1_add_dropped(cmp_v1_t *state, HDROP drop)
         v1_layout(state);
         if (state->locked)
             v1_fit_all(state);
+        v1_metrics_update(state);
         if (state->count >= 2)
             ShowWindow(state->hwnd, SW_SHOW);
         InvalidateRect(state->grid, NULL, FALSE);
@@ -713,6 +872,10 @@ static void v1_add_dropped(cmp_v1_t *state, HDROP drop)
     if (skipped)
         MessageBoxA(state->hwnd, "Some files were skipped (unsupported, non-ACP, or unreadable).",
                     "Compare Files", MB_OK | MB_ICONINFORMATION);
+    if (analysis_failed)
+        MessageBoxA(state->hwnd,
+                    "Analysis could not be allocated for one or more images; those images remain unmodified.",
+                    "Compare Analysis", MB_OK | MB_ICONERROR);
     if (limit_reached)
         MessageBoxA(state->hwnd, "The comparison image limit is 8, and V1 supports at most four images.",
                     "Compare Files", MB_OK | MB_ICONINFORMATION);
@@ -723,6 +886,8 @@ static void v1_remove_cell(cmp_v1_t *state, int index)
     int i;
     if (index < 0 || index >= state->count)
         return;
+    if (state->cells[index].ana)
+        CmpAna_Release(state->cells[index].image, state->mode);
     CmpImage_Unref(state->cells[index].image);
     for (i = index; i + 1 < state->count; i++)
         state->cells[i] = state->cells[i + 1];
@@ -734,18 +899,26 @@ static void v1_remove_cell(cmp_v1_t *state, int index)
     }
     v1_layout(state);
     v1_fit_all(state);
+    v1_metrics_update(state);
 }
 
 static void v1_open_v2(cmp_v1_t *state)
 {
     if (state->count >= 2)
-        CompareV2_Open(state->cells[0].image, state->cells[1].image);
+        CompareV2_OpenMode(state->cells[0].image, state->cells[1].image,
+                           state->mode);
     SetFocus(state->grid);
 }
 
 static BOOL v1_create_tooltip(cmp_v1_t *state)
 {
     TOOLINFOA info;
+    int i;
+    const char *texts[3] = {
+        "Show the Sharp Sobel edge analysis.",
+        "Show the Texture high-pass analysis.",
+        "Show the Neutral Lab color analysis."
+    };
     state->tooltip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
         WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, CW_USEDEFAULT, state->hwnd, NULL,
@@ -762,6 +935,20 @@ static BOOL v1_create_tooltip(cmp_v1_t *state)
         DestroyWindow(state->tooltip);
         state->tooltip = NULL;
         return FALSE;
+    }
+    for (i = 0; i < 3; i++) {
+        ZeroMemory(&info, sizeof(info));
+        info.cbSize = sizeof(info);
+        info.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        info.hwnd = state->hwnd;
+        info.uId = (UINT_PTR)state->btn_ana[i];
+        info.lpszText = (LPSTR)texts[i];
+        if (!SendMessageA(state->tooltip, TTM_ADDTOOLA, 0,
+                          (LPARAM)&info)) {
+            DestroyWindow(state->tooltip);
+            state->tooltip = NULL;
+            return FALSE;
+        }
     }
     return TRUE;
 }
@@ -838,6 +1025,7 @@ static LRESULT CALLBACK V1GridProc(HWND hwnd, UINT message, WPARAM wparam,
                 for (i = first; i < last; i++)
                     CmpView_Pan(&state->cells[i].view, dx, dy);
                 v1_clamp_all(state);
+                v1_metrics_schedule(state);
                 state->last = point;
                 InvalidateRect(hwnd, NULL, FALSE);
             } else if (old_hover != state->hover) {
@@ -944,20 +1132,31 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         state->snapshot = CreateWindowExA(0, "BUTTON", "Snapshot",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 126, 7, 82, 24, hwnd,
             (HMENU)V1_ID_SNAPSHOT, instance, NULL);
+        state->btn_ana[0] = CreateWindowExA(0, "BUTTON", "Sharp",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            212, 7, 62, 24, hwnd, (HMENU)V1_ID_ANA_SHARP, instance, NULL);
+        state->btn_ana[1] = CreateWindowExA(0, "BUTTON", "Texture",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            278, 7, 70, 24, hwnd, (HMENU)V1_ID_ANA_TEXTURE, instance, NULL);
+        state->btn_ana[2] = CreateWindowExA(0, "BUTTON", "Neutral",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            352, 7, 66, 24, hwnd, (HMENU)V1_ID_ANA_NEUTRAL, instance, NULL);
         state->metrics = CreateWindowExA(0, "BUTTON", "Metrics Report",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 304, 7, 94, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 424, 7, 94, 24, hwnd,
             (HMENU)V1_ID_METRICS, instance, NULL);
         state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 402, 7, 86, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 522, 7, 86, 24, hwnd,
             (HMENU)V1_ID_INFO, instance, NULL);
         state->message = CreateWindowExA(0, "STATIC", "",
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 494, 9, 560, 22, hwnd,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 614, 9, 440, 22, hwnd,
             NULL, instance, NULL);
         state->grid = CreateWindowExA(0, V1_GRID_CLASS, "",
             WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, V1_TOOLBAR_H, 0, 0,
             hwnd, NULL, instance, state);
-        if (!state->lock || !state->v2 || !state->snapshot || !state->metrics ||
-            !state->info_bar || !state->message || !state->grid)
+        if (!state->lock || !state->v2 || !state->snapshot ||
+            !state->btn_ana[0] || !state->btn_ana[1] || !state->btn_ana[2] ||
+            !state->metrics || !state->info_bar || !state->message ||
+            !state->grid)
             return -1;
         if (!v1_create_tooltip(state))
             return -1;
@@ -965,6 +1164,12 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         SendMessageA(state->lock, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->v2, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->snapshot, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->btn_ana[0], WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->btn_ana[1], WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
+        SendMessageA(state->btn_ana[2], WM_SETFONT,
+                     (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->metrics, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->info_bar, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         SendMessageA(state->message, WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
@@ -1019,6 +1224,14 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
             SetFocus(state->grid);
             return 0;
         }
+        if (LOWORD(wparam) >= V1_ID_ANA_SHARP &&
+            LOWORD(wparam) <= V1_ID_ANA_NEUTRAL &&
+            HIWORD(wparam) == BN_CLICKED) {
+            v1_set_mode(state, (cmp_ana_t)(CMP_ANA_SHARP +
+                LOWORD(wparam) - V1_ID_ANA_SHARP));
+            SetFocus(state->grid);
+            return 0;
+        }
         break;
     case WM_MOUSEWHEEL:
         if (state && state->grid)
@@ -1035,6 +1248,7 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
             return 0;
         {
         BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        BOOL alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (wparam == VK_ESCAPE ||
             (wparam == 'W' && ctrl)) {
@@ -1065,6 +1279,14 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
             v1_open_v2(state);
             return 1;
         }
+        if (!ctrl && !alt &&
+            (wparam == 'E' || wparam == 'T' || wparam == 'N')) {
+            cmp_ana_t mode = wparam == 'E' ? CMP_ANA_SHARP :
+                             (wparam == 'T' ? CMP_ANA_TEXTURE :
+                                              CMP_ANA_NEUTRAL);
+            v1_set_mode(state, mode);
+            return 1;
+        }
         if (!ctrl && wparam == '0') {
             int index = state->locked ? -1 :
                         (state->hover >= 0 ? state->hover : 0);
@@ -1077,6 +1299,7 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
                             cell->image_rect.right - cell->image_rect.left,
                             cell->image_rect.bottom - cell->image_rect.top,
                             1.0);
+                v1_metrics_schedule(state);
                 InvalidateRect(state->grid, NULL, FALSE);
             }
             return 1;
@@ -1100,6 +1323,14 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
         }
     case CMPM_METRICS:
         return state ? v1_run_metrics(state) : FALSE;
+    case WM_TIMER:
+        if (state && wparam == CMP_TID_METRIC) {
+            KillTimer(hwnd, CMP_TID_METRIC);
+            v1_metrics_update(state);
+            InvalidateRect(state->grid, NULL, FALSE);
+            return 0;
+        }
+        break;
     case WM_APP_METRICS_DONE:
         if (state && state->metrics_job == (metrics_async_job_t *)wparam) {
             Metrics_CloseProgress(state->progress);
