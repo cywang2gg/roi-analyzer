@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "metrics_async.h"
+#include "ui_scale.h"
 
 #define V1_TOOLBAR_H 40
 #define V1_ID_LOCK   4101
@@ -308,7 +309,7 @@ static void v1_layout(cmp_v1_t *state)
         int right = (col + 1) * (width + gap) / columns - gap;
         int top = row * (height + gap) / rows;
         int bottom = (row + 1) * (height + gap) / rows - gap;
-        int band = 23;
+        int band = Ui_Scale(23);
         cmp_cell_t *cell = &state->cells[i];
         cell->cell.left = left;
         cell->cell.top = top;
@@ -324,10 +325,10 @@ static void v1_layout(cmp_v1_t *state)
         cell->image_rect.top = top;
         cell->image_rect.right = right;
         cell->image_rect.bottom = cell->status_rect.top;
-        cell->close_rect.right = right - 5;
-        cell->close_rect.left = cell->close_rect.right - 20;
-        cell->close_rect.top = top + 5;
-        cell->close_rect.bottom = cell->close_rect.top + 20;
+        cell->close_rect.right = right - Ui_Scale(5);
+        cell->close_rect.left = cell->close_rect.right - Ui_Scale(20);
+        cell->close_rect.top = top + Ui_Scale(5);
+        cell->close_rect.bottom = cell->close_rect.top + Ui_Scale(20);
     }
     if (state->need_fit && width > 0 && height > 0) {
         state->need_fit = FALSE;
@@ -454,8 +455,8 @@ static void v1_render(cmp_v1_t *state, HDC dc, int width, int height,
         label[sizeof(label) - 1] = '\0';
         {
             RECT text_rect = cell->status_rect;
-            text_rect.left += 5;
-            text_rect.right -= 25;
+            text_rect.left += Ui_Scale(5);
+            text_rect.right -= Ui_Scale(25);
             SetTextColor(dc, state->mode != CMP_ANA_NONE &&
                          i == state->best ? RGB(255, 220, 0) :
                          RGB(245, 245, 245));
@@ -1124,34 +1125,44 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
     case WM_CREATE: {
         HINSTANCE instance = ((CREATESTRUCTA *)lparam)->hInstance;
         state->lock = CreateWindowExA(0, "BUTTON", "Lock",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 7, 7, 67, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, Ui_Scale(7), Ui_Scale(7),
+            Ui_Scale(67), Ui_Scale(24), hwnd,
             (HMENU)V1_ID_LOCK, instance, NULL);
         state->v2 = CreateWindowExA(0, "BUTTON", "V2",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 77, 7, 45, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(77), Ui_Scale(7),
+            Ui_Scale(45), Ui_Scale(24), hwnd,
             (HMENU)V1_ID_V2, instance, NULL);
         state->snapshot = CreateWindowExA(0, "BUTTON", "Snapshot",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 126, 7, 82, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(126), Ui_Scale(7),
+            Ui_Scale(82), Ui_Scale(24), hwnd,
             (HMENU)V1_ID_SNAPSHOT, instance, NULL);
         state->btn_ana[0] = CreateWindowExA(0, "BUTTON", "Sharp",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            212, 7, 62, 24, hwnd, (HMENU)V1_ID_ANA_SHARP, instance, NULL);
+            Ui_Scale(212), Ui_Scale(7), Ui_Scale(62), Ui_Scale(24), hwnd,
+            (HMENU)V1_ID_ANA_SHARP, instance, NULL);
         state->btn_ana[1] = CreateWindowExA(0, "BUTTON", "Texture",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            278, 7, 70, 24, hwnd, (HMENU)V1_ID_ANA_TEXTURE, instance, NULL);
+            Ui_Scale(278), Ui_Scale(7), Ui_Scale(70), Ui_Scale(24), hwnd,
+            (HMENU)V1_ID_ANA_TEXTURE, instance, NULL);
         state->btn_ana[2] = CreateWindowExA(0, "BUTTON", "Neutral",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            352, 7, 66, 24, hwnd, (HMENU)V1_ID_ANA_NEUTRAL, instance, NULL);
+            Ui_Scale(352), Ui_Scale(7), Ui_Scale(66), Ui_Scale(24), hwnd,
+            (HMENU)V1_ID_ANA_NEUTRAL, instance, NULL);
         state->metrics = CreateWindowExA(0, "BUTTON", "Metrics Report",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 424, 7, 94, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(424), Ui_Scale(7),
+            Ui_Scale(94), Ui_Scale(24), hwnd,
             (HMENU)V1_ID_METRICS, instance, NULL);
         state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 522, 7, 86, 24, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, Ui_Scale(522),
+            Ui_Scale(7), Ui_Scale(86), Ui_Scale(24), hwnd,
             (HMENU)V1_ID_INFO, instance, NULL);
         state->message = CreateWindowExA(0, "STATIC", "",
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 614, 9, 440, 22, hwnd,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, Ui_Scale(614),
+            Ui_Scale(9), Ui_Scale(440), Ui_Scale(22), hwnd,
             NULL, instance, NULL);
         state->grid = CreateWindowExA(0, V1_GRID_CLASS, "",
-            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, V1_TOOLBAR_H, 0, 0,
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0,
+            Ui_Scale(V1_TOOLBAR_H), 0, 0,
             hwnd, NULL, instance, state);
         if (!state->lock || !state->v2 || !state->snapshot ||
             !state->btn_ana[0] || !state->btn_ana[1] || !state->btn_ana[2] ||
@@ -1181,14 +1192,21 @@ static LRESULT CALLBACK V1WndProc(HWND hwnd, UINT message, WPARAM wparam,
     case WM_SIZE:
         if (state) {
             int width = LOWORD(lparam);
-            int height = HIWORD(lparam) - V1_TOOLBAR_H;
+            int height = HIWORD(lparam) - Ui_Scale(V1_TOOLBAR_H);
             if (height < 0)
                 height = 0;
             if (state->grid)
-                SetWindowPos(state->grid, NULL, 0, V1_TOOLBAR_H,
+                SetWindowPos(state->grid, NULL, 0, Ui_Scale(V1_TOOLBAR_H),
                              width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+            InvalidateRect(hwnd, NULL, TRUE);
         }
         return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *limits = (MINMAXINFO *)lparam;
+        limits->ptMinTrackSize.x = Ui_Scale(720);
+        limits->ptMinTrackSize.y = Ui_Scale(400);
+        return 0;
+    }
     case WM_COMMAND:
         if (!state)
             break;

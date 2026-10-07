@@ -9,9 +9,10 @@
 #include <string.h>
 
 #include "metrics_async.h"
+#include "ui_scale.h"
 
 #define V2_TOP_H       76
-#define V2_GROUP_H     64
+#define V2_GROUP_H     68
 #define V2_BOTTOM_H     28
 #define V2_ID_TRACK_L  4201
 #define V2_ID_TRACK_R  4202
@@ -33,7 +34,7 @@ typedef struct {
     HWND status;
     HWND track[2];
     HWND label[2];
-    HWND grp[4];
+    RECT grp_rc[4];
     HWND btn_ana[3];
     HWND sync;
     HWND pan_left;
@@ -564,7 +565,8 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
         HBRUSH yellow = CreateSolidBrush(RGB(255, 220, 0));
         HGDIOBJ old_brush = SelectObject(dc, yellow);
         int line_left, line_right;
-        line_width = (flags & CMP_RENDER_SNAPSHOT) ? Snap_Round(scale) : 2;
+        line_width = (flags & CMP_RENDER_SNAPSHOT) ?
+                     Snap_Round(scale) : Ui_Scale(2);
         if (line_width < 1)
             line_width = 1;
         line_left = split - line_width / 2;
@@ -618,13 +620,14 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
         left_label[sizeof(left_label) - 1] = '\0';
         right_label[sizeof(right_label) - 1] = '\0';
         if (flags & CMP_RENDER_SNAPSHOT) {
-            RECT logical = { 8, 8, width / 2, 32 };
+            RECT logical = { Ui_Scale(8), Ui_Scale(8), width / 2,
+                             Ui_Scale(32) };
             label = v2_scale_rect(&logical, scale);
         } else {
-            label.left = 8;
-            label.top = 8;
+            label.left = Ui_Scale(8);
+            label.top = Ui_Scale(8);
             label.right = client.right / 2;
-            label.bottom = 32;
+            label.bottom = Ui_Scale(32);
         }
         FillRect(dc, &label, black);
         SetTextColor(dc, state->mode != CMP_ANA_NONE &&
@@ -634,11 +637,14 @@ static void v2_render(cmp_v2_t *state, HDC dc, int width, int height,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                   DT_END_ELLIPSIS | DT_NOPREFIX);
         if (flags & CMP_RENDER_SNAPSHOT) {
-            RECT logical = { width / 2, 8, width - 8, 32 };
+            RECT logical = { width / 2, Ui_Scale(8),
+                             width - Ui_Scale(8), Ui_Scale(32) };
             label = v2_scale_rect(&logical, scale);
         } else {
             label.left = client.right / 2;
-            label.right = client.right - 8;
+            label.right = client.right - Ui_Scale(8);
+            label.top = Ui_Scale(8);
+            label.bottom = Ui_Scale(32);
         }
         FillRect(dc, &label, black);
         SetTextColor(dc, state->mode != CMP_ANA_NONE &&
@@ -781,64 +787,124 @@ static void v2_layout(cmp_v2_t *state)
 {
     RECT client;
     int width, gz, zoom_w, gx1, pan_w, gx2, act_w, gx3, ana_w;
-    int track_w, button_w, lower_w, ana_button_w, usable;
+    int label_w, track_x, track_w, button_w, lower_w, ana_button_w, usable;
     if (!GetClientRect(state->hwnd, &client))
         return;
     width = client.right;
-    gz = 4;
-    usable = width - 20;
+    gz = Ui_Scale(4);
+    usable = width - Ui_Scale(20);
     if (usable < 0)
         usable = 0;
     zoom_w = usable * 2 / 5;
-    gx1 = gz + zoom_w + 4;
+    gx1 = gz + zoom_w + Ui_Scale(4);
     pan_w = usable / 5;
-    gx2 = gx1 + pan_w + 4;
+    gx2 = gx1 + pan_w + Ui_Scale(4);
     act_w = usable / 5;
-    gx3 = gx2 + act_w + 4;
+    gx3 = gx2 + act_w + Ui_Scale(4);
     ana_w = usable - zoom_w - pan_w - act_w;
-    MoveWindow(state->overlay, 0, V2_TOP_H, width,
-               client.bottom - V2_TOP_H - V2_BOTTOM_H, TRUE);
-    MoveWindow(state->status, 0, client.bottom - V2_BOTTOM_H,
-               width, V2_BOTTOM_H, TRUE);
-    MoveWindow(state->grp[0], gz, 2, zoom_w, V2_GROUP_H, TRUE);
-    MoveWindow(state->grp[1], gx1, 2, pan_w, V2_GROUP_H, TRUE);
-    MoveWindow(state->grp[2], gx2, 2, act_w, V2_GROUP_H, TRUE);
-    MoveWindow(state->grp[3], gx3, 2, ana_w, V2_GROUP_H, TRUE);
-    /* Zoom tracks stretch with the half-width box. */
-    track_w = zoom_w - 45 - 10;
-    if (track_w < 80)
-        track_w = 80;
-    MoveWindow(state->label[0], gz + 8, 20, 32, 22, TRUE);
-    MoveWindow(state->track[0], gz + 45, 18, track_w, 24, TRUE);
-    MoveWindow(state->label[1], gz + 8, 44, 32, 22, TRUE);
-    MoveWindow(state->track[1], gz + 45, 42, track_w, 24, TRUE);
-    MoveWindow(state->sync, gx1 + 8, 20, 130, 22, TRUE);
-    MoveWindow(state->pan_left, gx1 + 8, 42, 70, 22, TRUE);
-    MoveWindow(state->pan_right, gx1 + 82, 42, 78, 22, TRUE);
-    button_w = (act_w - 24) / 3;
+    MoveWindow(state->overlay, 0, Ui_Scale(V2_TOP_H), width,
+               client.bottom - Ui_Scale(V2_TOP_H) -
+                   Ui_Scale(V2_BOTTOM_H), TRUE);
+    MoveWindow(state->status, 0, client.bottom - Ui_Scale(V2_BOTTOM_H),
+               width, Ui_Scale(V2_BOTTOM_H), TRUE);
+    SetRect(&state->grp_rc[0], gz, Ui_Scale(2), gz + zoom_w,
+            Ui_Scale(2) + Ui_Scale(V2_GROUP_H));
+    SetRect(&state->grp_rc[1], gx1, Ui_Scale(2), gx1 + pan_w,
+            Ui_Scale(2) + Ui_Scale(V2_GROUP_H));
+    SetRect(&state->grp_rc[2], gx2, Ui_Scale(2), gx2 + act_w,
+            Ui_Scale(2) + Ui_Scale(V2_GROUP_H));
+    SetRect(&state->grp_rc[3], gx3, Ui_Scale(2), gx3 + ana_w,
+            Ui_Scale(2) + Ui_Scale(V2_GROUP_H));
+    label_w = Ui_Scale(64);
+    track_x = gz + Ui_Scale(8) + label_w + Ui_Scale(6);
+    track_w = zoom_w - (track_x - gz) - Ui_Scale(10);
+    if (track_w < Ui_Scale(80))
+        track_w = Ui_Scale(80);
+    MoveWindow(state->label[0], gz + Ui_Scale(8), Ui_Scale(20),
+               label_w, Ui_Scale(22), TRUE);
+    MoveWindow(state->track[0], track_x, Ui_Scale(18), track_w,
+               Ui_Scale(24), TRUE);
+    MoveWindow(state->label[1], gz + Ui_Scale(8), Ui_Scale(46),
+               label_w, Ui_Scale(22), TRUE);
+    MoveWindow(state->track[1], track_x, Ui_Scale(44), track_w,
+               Ui_Scale(24), TRUE);
+    MoveWindow(state->sync, gx1 + Ui_Scale(8), Ui_Scale(20),
+               Ui_Scale(130), Ui_Scale(22), TRUE);
+    MoveWindow(state->pan_left, gx1 + Ui_Scale(8), Ui_Scale(42),
+               Ui_Scale(70), Ui_Scale(22), TRUE);
+    MoveWindow(state->pan_right, gx1 + Ui_Scale(82), Ui_Scale(42),
+               Ui_Scale(78), Ui_Scale(22), TRUE);
+    button_w = (act_w - Ui_Scale(24)) / 3;
     if (button_w < 1)
         button_w = 1;
-    MoveWindow(state->swap_button, gx2 + 6, 20, button_w, 22, TRUE);
-    MoveWindow(state->split_button, gx2 + 12 + button_w, 20,
-               button_w, 22, TRUE);
-    MoveWindow(state->reset_button, gx2 + 18 + button_w * 2, 20,
-               button_w, 22, TRUE);
-    lower_w = (act_w - 24) / 3;
+    MoveWindow(state->swap_button, gx2 + Ui_Scale(6), Ui_Scale(20),
+               button_w, Ui_Scale(22), TRUE);
+    MoveWindow(state->split_button, gx2 + Ui_Scale(12) + button_w,
+               Ui_Scale(20), button_w, Ui_Scale(22), TRUE);
+    MoveWindow(state->reset_button, gx2 + Ui_Scale(18) + button_w * 2,
+               Ui_Scale(20), button_w, Ui_Scale(22), TRUE);
+    lower_w = (act_w - Ui_Scale(24)) / 3;
     if (lower_w < 1)
         lower_w = 1;
-    MoveWindow(state->snapshot_button, gx2 + 6, 44, lower_w, 18, TRUE);
-    MoveWindow(state->info_bar, gx2 + 12 + lower_w, 44,
-               lower_w, 18, TRUE);
-    MoveWindow(state->metrics_button, gx2 + 18 + lower_w * 2, 44,
-               lower_w, 18, TRUE);
-    ana_button_w = (ana_w - 24) / 3;
+    MoveWindow(state->snapshot_button, gx2 + Ui_Scale(6), Ui_Scale(44),
+               lower_w, Ui_Scale(18), TRUE);
+    MoveWindow(state->info_bar, gx2 + Ui_Scale(12) + lower_w, Ui_Scale(44),
+               lower_w, Ui_Scale(18), TRUE);
+    MoveWindow(state->metrics_button,
+               gx2 + Ui_Scale(18) + lower_w * 2, Ui_Scale(44),
+               lower_w, Ui_Scale(18), TRUE);
+    ana_button_w = (ana_w - Ui_Scale(24)) / 3;
     if (ana_button_w < 1)
         ana_button_w = 1;
-    MoveWindow(state->btn_ana[0], gx3 + 6, 44, ana_button_w, 18, TRUE);
-    MoveWindow(state->btn_ana[1], gx3 + 12 + ana_button_w, 44,
-               ana_button_w, 18, TRUE);
-    MoveWindow(state->btn_ana[2], gx3 + 18 + ana_button_w * 2, 44,
-               ana_button_w, 18, TRUE);
+    MoveWindow(state->btn_ana[0], gx3 + Ui_Scale(6), Ui_Scale(44),
+               ana_button_w, Ui_Scale(18), TRUE);
+    MoveWindow(state->btn_ana[1], gx3 + Ui_Scale(12) + ana_button_w,
+               Ui_Scale(44), ana_button_w, Ui_Scale(18), TRUE);
+    MoveWindow(state->btn_ana[2],
+               gx3 + Ui_Scale(18) + ana_button_w * 2, Ui_Scale(44),
+               ana_button_w, Ui_Scale(18), TRUE);
+}
+
+static void v2_paint_control_bar(cmp_v2_t *state, HDC dc)
+{
+    static const char *titles[4] = {
+        "Zoom", "Pan & Sync", "Actions", "Analyze"
+    };
+    RECT client, bar, frame_rc, text_rc;
+    SIZE text_sz;
+    HFONT old_font;
+    int k, cx;
+    if (!GetClientRect(state->hwnd, &client))
+        return;
+    bar.left = 0;
+    bar.top = 0;
+    bar.right = client.right;
+    bar.bottom = Ui_Scale(V2_TOP_H);
+    FillRect(dc, &bar, (HBRUSH)(COLOR_BTNFACE + 1));
+    old_font = (HFONT)SelectObject(dc, Compare_Font());
+    SetBkMode(dc, OPAQUE);
+    SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
+    SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+    for (k = 0; k < 4; k++) {
+        if (state->grp_rc[k].right <= state->grp_rc[k].left)
+            continue;
+        if (!GetTextExtentPoint32A(dc, titles[k], (int)strlen(titles[k]),
+                                   &text_sz))
+            continue;
+        cx = text_sz.cx;
+        frame_rc = state->grp_rc[k];
+        frame_rc.top += text_sz.cy / 2;
+        DrawEdge(dc, &frame_rc, EDGE_ETCHED, BF_RECT);
+        text_rc.left = state->grp_rc[k].left + Ui_Scale(8);
+        text_rc.top = state->grp_rc[k].top;
+        text_rc.right = text_rc.left + cx + Ui_Scale(4);
+        text_rc.bottom = text_rc.top + text_sz.cy;
+        ExtTextOutA(dc, state->grp_rc[k].left + Ui_Scale(10),
+                    state->grp_rc[k].top, ETO_OPAQUE, &text_rc, titles[k],
+                    (UINT)strlen(titles[k]), NULL);
+    }
+    if (old_font)
+        SelectObject(dc, old_font);
 }
 
 static void v2_zoom_both(cmp_v2_t *state, int direction, int x, int y)
@@ -1019,73 +1085,77 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
     case WM_CREATE: {
         HINSTANCE instance = ((CREATESTRUCTA *)lparam)->hInstance;
         int i;
-        state->grp[0] = CreateWindowExA(0, "BUTTON", "Zoom",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 4, 2, 260, V2_GROUP_H,
-            hwnd, NULL, instance, NULL);
-        state->grp[1] = CreateWindowExA(0, "BUTTON", "Pan & Sync",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 270, 2, 205, V2_GROUP_H,
-            hwnd, NULL, instance, NULL);
-        state->grp[2] = CreateWindowExA(0, "BUTTON", "Actions",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 481, 2, 350, V2_GROUP_H,
-            hwnd, NULL, instance, NULL);
-        state->grp[3] = CreateWindowExA(0, "BUTTON", "Analyze",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 835, 2, 220, V2_GROUP_H,
-            hwnd, NULL, instance, NULL);
         state->label[0] = CreateWindowExA(0, "STATIC", "L: 100%",
-            WS_CHILD | WS_VISIBLE, 12, 20, 32, 22, hwnd, NULL, instance, NULL);
+            WS_CHILD | WS_VISIBLE, Ui_Scale(12), Ui_Scale(20), Ui_Scale(64),
+            Ui_Scale(22), hwnd, NULL, instance, NULL);
         state->track[0] = CreateWindowExA(0, TRACKBAR_CLASSA, "",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
-            45, 18, 170, 24, hwnd, (HMENU)V2_ID_TRACK_L, instance, NULL);
+            Ui_Scale(78), Ui_Scale(18), Ui_Scale(170), Ui_Scale(24), hwnd,
+            (HMENU)V2_ID_TRACK_L, instance, NULL);
         state->label[1] = CreateWindowExA(0, "STATIC", "R: 100%",
-            WS_CHILD | WS_VISIBLE, 12, 44, 32, 22, hwnd, NULL, instance, NULL);
+            WS_CHILD | WS_VISIBLE, Ui_Scale(12), Ui_Scale(46), Ui_Scale(64),
+            Ui_Scale(22), hwnd, NULL, instance, NULL);
         state->track[1] = CreateWindowExA(0, TRACKBAR_CLASSA, "",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
-            45, 42, 170, 24, hwnd, (HMENU)V2_ID_TRACK_R, instance, NULL);
+            Ui_Scale(78), Ui_Scale(44), Ui_Scale(170), Ui_Scale(24), hwnd,
+            (HMENU)V2_ID_TRACK_R, instance, NULL);
         state->sync = CreateWindowExA(0, "BUTTON", "Sync pan",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 286, 20, 130, 22,
-            hwnd, (HMENU)V2_ID_SYNC, instance, NULL);
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, Ui_Scale(286),
+            Ui_Scale(20), Ui_Scale(130), Ui_Scale(22), hwnd,
+            (HMENU)V2_ID_SYNC, instance, NULL);
         state->pan_left = CreateWindowExA(0, "BUTTON", "Left",
             WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
-            286, 42, 70, 22, hwnd, (HMENU)V2_ID_LEFT, instance, NULL);
+            Ui_Scale(286), Ui_Scale(42), Ui_Scale(70), Ui_Scale(22), hwnd,
+            (HMENU)V2_ID_LEFT, instance, NULL);
         state->pan_right = CreateWindowExA(0, "BUTTON", "Right",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            360, 42, 78, 22, hwnd, (HMENU)V2_ID_RIGHT, instance, NULL);
+            Ui_Scale(360), Ui_Scale(42), Ui_Scale(78), Ui_Scale(22), hwnd,
+            (HMENU)V2_ID_RIGHT, instance, NULL);
         state->swap_button = CreateWindowExA(0, "BUTTON", "Swap",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 490, 24, 70, 28,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(490),
+            Ui_Scale(24), Ui_Scale(70), Ui_Scale(28),
             hwnd, (HMENU)V2_ID_SWAP, instance, NULL);
         state->split_button = CreateWindowExA(0, "BUTTON", "Split: ON",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            566, 24, 95, 28, hwnd, (HMENU)V2_ID_SPLIT, instance, NULL);
+            Ui_Scale(566), Ui_Scale(24), Ui_Scale(95), Ui_Scale(28), hwnd,
+            (HMENU)V2_ID_SPLIT, instance, NULL);
         state->reset_button = CreateWindowExA(0, "BUTTON", "Reset All",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 668, 24, 100, 28,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(668),
+            Ui_Scale(24), Ui_Scale(100), Ui_Scale(28),
             hwnd, (HMENU)V2_ID_RESET, instance, NULL);
         state->snapshot_button = CreateWindowExA(0, "BUTTON", "Snapshot",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 770, 43, 78, 20,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(770),
+            Ui_Scale(43), Ui_Scale(78), Ui_Scale(20),
             hwnd, (HMENU)V2_ID_SNAPSHOT, instance, NULL);
         state->metrics_button = CreateWindowExA(0, "BUTTON", "Metrics",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 938, 43, 90, 20,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, Ui_Scale(938),
+            Ui_Scale(43), Ui_Scale(90), Ui_Scale(20),
             hwnd, (HMENU)V2_ID_METRICS, instance, NULL);
         state->info_bar = CreateWindowExA(0, "BUTTON", "Info bar",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 850, 43, 86, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, Ui_Scale(850),
+            Ui_Scale(43), Ui_Scale(86), Ui_Scale(20),
             hwnd, (HMENU)V2_ID_INFO, instance, NULL);
         state->btn_ana[0] = CreateWindowExA(0, "BUTTON", "Sharp",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            842, 43, 58, 20, hwnd, (HMENU)V2_ID_ANA_SHARP, instance, NULL);
+            Ui_Scale(842), Ui_Scale(43), Ui_Scale(58), Ui_Scale(20), hwnd,
+            (HMENU)V2_ID_ANA_SHARP, instance, NULL);
         state->btn_ana[1] = CreateWindowExA(0, "BUTTON", "Texture",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            902, 43, 66, 20, hwnd, (HMENU)V2_ID_ANA_TEXTURE, instance, NULL);
+            Ui_Scale(902), Ui_Scale(43), Ui_Scale(66), Ui_Scale(20), hwnd,
+            (HMENU)V2_ID_ANA_TEXTURE, instance, NULL);
         state->btn_ana[2] = CreateWindowExA(0, "BUTTON", "Neutral",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-            970, 43, 66, 20, hwnd, (HMENU)V2_ID_ANA_NEUTRAL, instance, NULL);
+            Ui_Scale(970), Ui_Scale(43), Ui_Scale(66), Ui_Scale(20), hwnd,
+            (HMENU)V2_ID_ANA_NEUTRAL, instance, NULL);
         state->overlay = CreateWindowExA(0, V2_OVERLAY_CLASS, "",
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, V2_TOP_H, 0, 0,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0,
+            Ui_Scale(V2_TOP_H), 0, 0,
             hwnd, NULL, instance, state);
         state->status = CreateWindowExA(0, "STATIC", "",
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 4, 0, 0, V2_BOTTOM_H,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, Ui_Scale(4), 0, 0,
+            Ui_Scale(V2_BOTTOM_H),
             hwnd, NULL, instance, NULL);
-        if (!state->grp[0] || !state->grp[1] || !state->grp[2] ||
-            !state->grp[3] ||
-            !state->label[0] ||
+        if (!state->label[0] ||
             !state->label[1] || !state->track[0] || !state->track[1] ||
             !state->sync || !state->pan_left || !state->pan_right ||
             !state->swap_button || !state->split_button ||
@@ -1096,10 +1166,6 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
             return -1;
         if (!v2_create_tooltip(state))
             return -1;
-        SendMessageA(state->grp[0], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
-        SendMessageA(state->grp[1], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
-        SendMessageA(state->grp[2], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
-        SendMessageA(state->grp[3], WM_SETFONT, (WPARAM)Compare_Font(), TRUE);
         for (i = 0; i < 2; i++) {
             SendMessageA(state->track[i], TBM_SETRANGE, TRUE,
                          MAKELONG(2, 800));
@@ -1141,16 +1207,27 @@ static LRESULT CALLBACK V2WndProc(HWND hwnd, UINT message, WPARAM wparam,
         v2_layout(state);
         return 0;
     }
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        HDC dc;
+        dc = BeginPaint(hwnd, &paint);
+        if (state)
+            v2_paint_control_bar(state, dc);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
     case WM_SIZE:
         if (state) {
             v2_layout(state);
             v2_update_status(state);
+            RedrawWindow(hwnd, NULL, NULL,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
         }
         return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *limits = (MINMAXINFO *)lparam;
-        limits->ptMinTrackSize.x = 900;
-        limits->ptMinTrackSize.y = 420;
+        limits->ptMinTrackSize.x = Ui_Scale(900);
+        limits->ptMinTrackSize.y = Ui_Scale(420);
         return 0;
     }
     case WM_COMMAND:

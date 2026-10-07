@@ -25,6 +25,7 @@
 #include "rotate.h"
 #include "settings.h"
 #include "table.h"
+#include "ui_scale.h"
 
 #define IDM_OPEN       101
 #define IDM_EXPORT     102
@@ -101,6 +102,8 @@ app_t g_app;
 
 static ULONG_PTR g_gdiplus;
 static HACCEL g_accelerators;
+static HFONT s_ui_font;
+int g_ui_dpi = 96;
 static BOOL g_syncing_table;
 static BOOL g_main_wm_create_started;
 static HMENU g_menu_mode;
@@ -126,6 +129,43 @@ static size_t s_pending_head;
 static size_t s_pending_count;
 static unsigned int s_dropped_files;
 static BOOL s_prompt_open;
+
+int Ui_Dpi(void)
+{
+    return g_ui_dpi;
+}
+
+int Ui_Scale(int px)
+{
+    return MulDiv(px, g_ui_dpi, 96);
+}
+
+static HFONT create_ui_font(void)
+{
+    LOGFONTA lf;
+    int dpi;
+
+    dpi = g_ui_dpi;
+    ZeroMemory(&lf, sizeof(lf));
+    lf.lfHeight = -MulDiv(9, dpi, 72);
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lstrcpyA(lf.lfFaceName, "Segoe UI");
+    return CreateFontIndirectA(&lf);
+}
+
+static BOOL CALLBACK set_font_proc(HWND child, LPARAM param)
+{
+    SendMessageA(child, WM_SETFONT, (WPARAM)param, TRUE);
+    return TRUE;
+}
+
+static void App_SetControlFont(HWND parent, HFONT font)
+{
+    if (parent && font)
+        EnumChildWindows(parent, set_font_proc, (LPARAM)font);
+}
 
 static BOOL App_InitCommonControls(void);
 static void Layout(void);
@@ -557,9 +597,11 @@ void App_StatusSetIndex(void)
 void App_StatusLayout(void)
 {
     RECT client;
-    int width, left = 220, mode = 200, index = 90, time = 260;
-    int minimum_left = 80, minimum_mode = 90, minimum_index = 45;
-    int minimum_time = 120;
+    int width, left = Ui_Scale(220), mode = Ui_Scale(200);
+    int index = Ui_Scale(90), time = Ui_Scale(260);
+    int minimum_left = Ui_Scale(80), minimum_mode = Ui_Scale(90);
+    int minimum_index = Ui_Scale(45);
+    int minimum_time = Ui_Scale(120);
     int msg;
     int parts[SB_PART_COUNT];
     if (!g_app.hwnd_status)
@@ -1011,7 +1053,8 @@ static void Layout(void)
 {
     RECT client, status_rect;
     int width, height, status_height = 0;
-    int table_height, button_height = 28, tabs_height = 28, canvas_height;
+    int table_height, button_height = Ui_Scale(28);
+    int tabs_height = Ui_Scale(28), canvas_height;
     int available, canvas_width, hist_width = 0;
     BOOL show_panel;
 
@@ -1024,15 +1067,15 @@ static void Layout(void)
     GetWindowRect(g_app.hwnd_status, &status_rect);
     status_height = status_rect.bottom - status_rect.top;
     width = client.right;
-    show_panel = g_app.show_hist && width >= 520;
+    show_panel = g_app.show_hist && width >= Ui_Scale(520);
     if (show_panel) {
-        hist_width = HISTPANEL_DEF_WIDTH;
-        if (width - hist_width < 320) {
-            hist_width = width - 320;
-            if (hist_width < HISTPANEL_MIN_WIDTH)
-                hist_width = HISTPANEL_MIN_WIDTH;
+        hist_width = Ui_Scale(HISTPANEL_DEF_WIDTH);
+        if (width - hist_width < Ui_Scale(320)) {
+            hist_width = width - Ui_Scale(320);
+            if (hist_width < Ui_Scale(HISTPANEL_MIN_WIDTH))
+                hist_width = Ui_Scale(HISTPANEL_MIN_WIDTH);
         }
-        if (width - hist_width < 200) {
+        if (width - hist_width < Ui_Scale(200)) {
             show_panel = FALSE;
             hist_width = 0;
         }
@@ -1046,10 +1089,10 @@ static void Layout(void)
         height = 0;
     available = height - button_height;
     table_height = (int)((double)client.bottom * 0.30);
-    if (table_height < 140)
-        table_height = 140;
-    if (available - table_height < 100)
-        table_height = available - 100;
+    if (table_height < Ui_Scale(140))
+        table_height = Ui_Scale(140);
+    if (available - table_height < Ui_Scale(100))
+        table_height = available - Ui_Scale(100);
     if (table_height < 0)
         table_height = 0;
     if (table_height < tabs_height)
@@ -1063,11 +1106,14 @@ static void Layout(void)
     if (show_panel)
         SetWindowPos(g_app.hwnd_hist, NULL, canvas_width, 0, hist_width,
                      canvas_height, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(g_app.hwnd_btn_export, NULL, 8, canvas_height + 2, 78, 24,
+    SetWindowPos(g_app.hwnd_btn_export, NULL, Ui_Scale(8),
+                 canvas_height + Ui_Scale(2), Ui_Scale(78), Ui_Scale(24),
                  SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(g_app.hwnd_btn_clear, NULL, 92, canvas_height + 2, 70, 24,
+    SetWindowPos(g_app.hwnd_btn_clear, NULL, Ui_Scale(92),
+                 canvas_height + Ui_Scale(2), Ui_Scale(70), Ui_Scale(24),
                  SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(g_app.hwnd_chk_multi, NULL, 172, canvas_height + 2, 100, 24,
+    SetWindowPos(g_app.hwnd_chk_multi, NULL, Ui_Scale(172),
+                 canvas_height + Ui_Scale(2), Ui_Scale(100), Ui_Scale(24),
                  SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g_app.hwnd_tabs, NULL, 0, canvas_height + button_height,
                  width, tabs_height, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2248,6 +2294,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         }
         (void)Detect_Init(hwnd);
         DragAcceptFiles(hwnd, TRUE);
+        App_SetControlFont(hwnd, s_ui_font);
         Layout();
         App_UpdateStatus();
         return 0;
@@ -2256,15 +2303,26 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
         Layout();
         App_UpdateStatus();
         return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *limits = (MINMAXINFO *)lparam;
+        limits->ptMinTrackSize.x = Ui_Scale(640);
+        limits->ptMinTrackSize.y = Ui_Scale(480);
+        return 0;
+    }
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
+        HGDIOBJ old_font;
         if (draw && draw->hwndItem == g_app.hwnd_status &&
             draw->itemID == SB_PART_INDEX) {
             const char *text = (const char *)draw->itemData;
             FillRect(draw->hDC, &draw->rcItem, GetSysColorBrush(COLOR_3DFACE));
             SetBkMode(draw->hDC, TRANSPARENT);
+            old_font = SelectObject(draw->hDC,
+                        s_ui_font ? s_ui_font :
+                        (HFONT)GetStockObject(DEFAULT_GUI_FONT));
             DrawTextA(draw->hDC, text ? text : "", -1, &draw->rcItem,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(draw->hDC, old_font);
             return TRUE;
         }
         break;
@@ -2583,6 +2641,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     locate_options_t locate_options;
 
     (void)previous;
+    {
+        HDC screen = GetDC(NULL);
+        g_ui_dpi = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
+        if (screen)
+            ReleaseDC(NULL, screen);
+        if (g_ui_dpi <= 0)
+            g_ui_dpi = 96;
+    }
     memset(&g_app, 0, sizeof(g_app));
     g_app.file_idx = -1;
     com_result = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -2601,7 +2667,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     QueryPerformanceFrequency(&g_qpc_frequency);
     ROI_Init(&g_app.rois, &g_app.drag);
     App_InitCommonControls();
-    if (!Compare_Init(instance, (HFONT)GetStockObject(DEFAULT_GUI_FONT))) {
+    s_ui_font = create_ui_font();
+    if (!Compare_Init(instance, s_ui_font)) {
         MessageBoxA(NULL, "Could not register the comparison window classes.",
                     "ROI Analyzer", MB_OK | MB_ICONERROR);
         CoUninitialize();
@@ -2728,6 +2795,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
         DispatchMessageA(&msg);
         g_discard_approved = FALSE;
     }
+    if (s_ui_font)
+        DeleteObject(s_ui_font);
     if (g_accelerators)
         DestroyAcceleratorTable(g_accelerators);
     Image_Free(&g_app.img);

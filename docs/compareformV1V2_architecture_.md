@@ -1309,3 +1309,111 @@ ANSI 建置下 Big5（CP950）／Shift-JIS 雙位元組字元的第二位元組�
 - 資訊列：寬 = 物理寬，高度用放大字型量測（`CmpInfo_Height`）。**顯示的倍率與 `src` 可見區仍用原本的 `z` 與邏輯 rect**（`CmpView_VisibleRect`）計算——資訊列描述「使用者在螢幕上看到什麼」，不是描述輸出點陣的內部倍率。
 - 螢幕繪製零回歸：`v1_render` 簽章未變；`v2_render` 新增 `scale`／`font` 參數，螢幕呼叫固定傳 `1.0` ＋ `Cmp_UiFont()`。
 - 副作用：150% 縮放時輸出像素量為 2.25 倍（PNG 較大、WIC 編碼較久）；跨不同 DPI 螢幕時 `Snap_PhysicalScale` 每次 Snapshot 重新量測，尺寸自動跟隨。長期建議仍在 manifest 宣告 Per-Monitor V2 並處理 `WM_DPICHANGED`，屆時 `scale` 恆為 1.0，本段程式碼不需再改。
+
+---
+
+## 15. V2 控制列群組框標題殘影（最大化後）— 問題、原因、對策（v1.2，agy review 完成）
+
+> 狀態：**對策 A 實測失敗 → agy review round 1 完成（§15.8）→ 發包對策 C**。
+> 觸發：`Ui_Scale`（全套 DPI 縮放）併入後，V2 視窗**最大化**時才出現；非最大化正常。
+> **A 失敗關鍵新證據**：使用者可透過點選（active/inactive 切換）看到明顯「兩層」差異 → 殘影存在於父視窗背景層（被 `WS_CLIPCHILDREN` 排除、從未被擦除），子視窗透明畫上新 caption。
+
+### 15.1 症狀（截圖取證）
+
+| 群組框 | 症狀 |
+|---|---|
+| Zoom（最左，最先繪製） | **乾淨**，無殘影 |
+| Pan & Sync | caption 左緣有殘留字元碎片（讀作 `FPan Sync`）＋左邊框斷裂缺口 |
+| Actions | 同上（讀作 `AActions` 或 `\Actions`） |
+| Analyze | 同上（讀作 `iAnalyze`） |
+
+另觀察：
+- 殘影為**水平向左偏移數 px** 的字元碎片，緊貼在 caption 正常位置左側（＝舊位置的殘留）。
+- Pan & Sync 內 radio 列有一塊**灰色矩形殘留**（疑似 checkbox/radio 背景未擦除）。
+- **僅最大化後出現**；縮回非最大化則恢復正常。
+- V1 視窗**無** `BS_GROUPBOX`（`grep BS_GROUPBOX` = 0），故 V1 無此症；V2 有 4 個（`grp[0..3]`）。
+
+### 15.2 已確認的程式事實（實碼）
+
+| # | 事實 | 證據 |
+|---|---|---|
+| F1 | V2 頂層視窗（`V2_CLASS`）**沒有** `WM_PAINT`、**沒有** `WM_ERASEBKGND` handler → 全落 `DefWindowProcA` | `V2WndProc`（`compare_v2.c:1033`）case 列表僅 NCCREATE/CREATE/SIZE/GETMINMAXINFO/COMMAND/HSCROLL/MOUSEWHEEL/TIMER/APP_METRICS_DONE/DESTROY/NCDESTROY |
+| F2 | 頂層類別背景刷 = `(HBRUSH)(COLOR_BTNFACE + 1)` | `compare_v2.c:1411` |
+| F3 | 頂層視窗樣式含 `WS_CLIPCHILDREN` | `compare_v2.c:1458` |
+| F4 | 4 個群組框為子視窗 `BS_GROUPBOX`；`v2_layout` 以 `MoveWindow(..., TRUE)` 移動 | `compare_v2.c:810-816` |
+| F5 | `WM_SIZE` 已呼叫 `InvalidateRect(hwnd, NULL, TRUE)`（前次修補）——**仍不足以消除殘影** | `compare_v2.c:1194` |
+| F6 | `v2_layout` 用**比例式**算群組框 x（`zoom_w = usable*2/5` 等）→ 最大化時 4 個群組框**水平大幅位移** | `compare_v2.c:794-816` |
+| F7 | 無 `WM_CTLCOLOR*` handler、無 `RedrawWindow`/`RDW_*`、無 `WS_EX_COMPOSITED` | `grep` 皆 0 |
+
+### 15.3 原因（分級）
+
+**H1（主因，高信心）——`BS_GROUPBOX` 的內部不會自我擦除。**
+`BS_GROUPBOX` 按鈕只繪製「邊框＋標題」，其**內部為透明**（不填不透明背景刷）。子視窗被 `MoveWindow` 移動後，其自身 `WM_PAINT` 會重畫邊框與 caption，但**舊 caption 的像素留在原處**（群組框不擦自己的內部）。最大化時群組框水平大幅位移（F6），舊 caption 位置的新、舊字元重疊 → `FPan Sync`／`AActions`／`iAnalyze`。
+
+**H2（協同因，高信心）——`WS_CLIPCHILDREN` 使父視窗的 `InvalidateRect` 不含子視窗。**
+F5 的 `InvalidateRect(hwnd, NULL, TRUE)` 在 `WS_CLIPCHILDREN`（F3）下**只更新父視窗客戶區、排除子視窗**；群組框本身不被強制重畫＋擦除。父視窗背景刷（F2）雖會擦「群組框之間的空隙」，但擦不到**群組框內部**的舊 caption。兩者疊加 → 殘影。
+
+**H3（次要，中信心）——`WM_CTLCOLOR` 缺失。**
+checkbox（`Sync pan`）與 radio（`Left`/`Right`）在群組框內，無 `WM_CTLCOLORSTATIC`/`WM_CTLCOLORBTN` 回傳背景刷 → 其背景不透明殘留 → 對應截圖中 Pan & Sync 的灰色矩形。
+
+**非因（已排除）**：
+- 非 DPI 縮放漏項（`Ui_Scale` 已套用；且非最大化時乾淨）。
+- 非 `InvalidateRect` 漏呼叫（F5 已在，只是不足以涵蓋子視窗）。
+- 非 Win32/Win64、非字型、非 `WS_EX_TRANSPARENT`。
+
+### 15.4 對策（候選，依建議序）
+
+| # | 對策 | 做法 | 優 | 缺 |
+|---|---|---|---|---|
+| **A（首選）** | `WM_SIZE` 改用 `RedrawWindow` 含 `RDW_ALLCHILDREN` | 將 F5 的 `InvalidateRect(hwnd,NULL,TRUE)` 改為 `RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE \| RDW_ERASE \| RDW_ALLCHILDREN)` | 一行改動；`RDW_ALLCHILDREN` 強制**子視窗一併 invalidate＋erase**，直接解 H2；對 H1 亦有效（子視窗被要求擦除） | 需實測確認 `BS_GROUPBOX` 是否響應 erase（H1 若根深，仍可能殘留） |
+| **B（補強）** | 加 `WM_CTLCOLORSTATIC`／`WM_CTLCOLORBTN` 回傳背景刷 | `case WM_CTLCOLORSTATIC: SetBkMode((HDC)wparam, TRANSPARENT); return (LRESULT)(HBRUSH)(COLOR_BTNFACE+1);`（BTN 同理） | 解 H3 灰塊；令子控制項背景一致 | 需逐一確認哪些控制項送哪個訊息 |
+| **C（穩健）** | 群組框改為**父視窗自繪**（不建子 HWND） | 移除 `grp[0..3]` 子視窗，改在頂層 `WM_PAINT` 以 `DrawFrameControl(DFC_BUTTON/DFCS_...)` 或手繪框＋`DrawText` 繪製 | 徹底消除「子視窗殘影」類問題；與 V1 現行做法一致（V1 群組框即自繪） | 改動較大；需重排群組框與其內控制項的 z 序（控制項仍在最上層） |
+| **D（最省）** | 父視窗加 `WS_EX_COMPOSITED` | `CreateWindowExA(WS_EX_COMPOSITED, ...)` | 由 DWM 合成整窗，消除殘影 | 可能影響拖曳/縮放流暢度；屬整窗行為改變，風險較高 |
+
+### 15.5 建議流程
+
+1. **先做確認實驗**（不改正式碼）：把對策 A 的 `RedrawWindow(...RDW_ALLCHILDREN)` 套入 `WM_SIZE` 建置測試——若殘影消失，H1＋H2 確認，A 即為定案修法；若仍殘留，再加對策 B，仍未解則採對策 C。
+2. 確認後才發包實作（一問題一 commit）。
+3. 若採 A／B，`WM_GETMINMAXINFO`、`v2_layout` 不動；若採 C，需另立架構書（群組框自繪＋z 序）。
+
+### 15.6 codex review 判定（round 1，2026-10-05）
+
+| # | 項目 | 判定 | 說明 |
+|---|---|---|---|
+| 1 | F1 無 WM_PAINT/WM_ERASEBKGND | **AGREE** | overlay 有 handler、頂層沒有，區分正確 |
+| 2 | H1 groupbox 不自我擦除 | **UNCERTAIN／過度陳述** | `MoveWindow(..., TRUE)` 本身會要求重畫「被移開露出的父區」，故非單純「不擦內部」；**真機制較可能是**：非不透明 groupbox ＋ `WS_CLIPCHILDREN` ＋ **兄弟視窗依序移動時新舊矩形暫時重疊**（group 1 擴張蓋住 group 2–4 舊位置）→ 重疊區碎片被保留 |
+| 3 | H2 CLIPCHILDREN 排除子視窗 | **AGREE**（補充範圍） | 父視窗 `InvalidateRect` 無法刷新子視窗區，此為前次修補失效的直接原因 |
+| 4 | H3 CTLCOLOR 灰矩形 | **DISAGREE（非根因）** | checkbox/radio 是 BUTTON（收 `WM_CTLCOLORBTN`）非 STATIC；無 handler = 正常預設色，不致殘留灰塊；可改一致性但非本症成因 |
+| 5 | F1–F7 事實 | **全 AGREE**（F5/F6 註記「事實對、非完整解釋」） | — |
+| 6 | 缺漏原因（codex 新增） | — | 內部控制項與 groupbox 是**兄弟**（parent 用 `hwnd` 而非 `grp[n]`）；groupbox **無 `WS_CLIPSIBLINGS`** → 移動時兄弟重疊未被裁剪 |
+| 7 | Zoom 乾淨不對稱 | **部分 DISAGREE** | 比例式只解釋 group1 錨定於 `gz`；更具體機制 = group1 擴張覆蓋 group 2–4 舊矩形，預測「Zoom 乾淨、後三個髒」 |
+
+**對策排序（codex）**：有效性 **C > A > D > B**；風險 A/B 低、C 中、D 高。
+**最終建議**：**先上 A**（`RedrawWindow(... RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN)` 取代父視窗單獨 `InvalidateRect`）——窄範圍、低風險的驗證兼修復；**若殘影仍在 → 上 C**（保留控制項、僅移除 4 個 `BS_GROUPBOX` 子視窗、改父視窗 `WM_PAINT` 繪框＋標題，畫於子控制項之下）；**B／D 不作主修**。
+
+### 15.7 待確認（review 重點）
+
+| # | 議題 | 本書立場（codex 後） |
+|---|---|---|
+| Q1 | 主因 | H2 確認（AGREE）＋H1 修正為「兄弟視窗重疊＋無 `WS_CLIPSIBLINGS`」（codex 新增）；對策 A 實測即驗 |
+| Q2 | 灰色矩形 | H3 降為**非根因**（codex DISAGREE）；若 A 後仍存再查 |
+| Q3 | 是否跳 C | codex：A 先行（低風險），殘影仍在才 C；B/D 不作主修 |
+| Q4 | V1 是否需同步 | V1 無群組框，暫不需 |
+
+### 15.8 agy review round 1 判定（2026-10-05）
+
+| # | 問題 | 判定 |
+|---|---|---|
+| 1 | 為何 A 失敗 | **「擦除真空（erase void）」**：父視窗 `WS_CLIPCHILDREN` 把 `grp[0..3]` 矩形從父層裁掉→父層**永不擦**群組框區；`BS_GROUPBOX`（BUTTON 類別 `hbrBackground=NULL`）只畫蝕刻框＋透明 caption、**不填內部**→兩者都不寫該矩形→最大化位移後舊像素永久殘留於父層，子視窗新 caption 透明疊上＝「兩層」。與點選切換（`WM_NCACTIVATE` 重畫子層、父層不變）完全吻合 |
+| 2 | `MoveWindow` vs `RedrawWindow` 順序 | **非成因**；即使先擦後移、或 `SWP_NOREDRAW`，只要 groupbox 子視窗還在，無人會 `FillRect(COLOR_BTNFACE)` 該矩形 |
+| 3 | 對策排序 | **C 100% 有效（根治）**；(d) 去 CLIPCHILDREN＝畫布閃灰 reject；(c) hide/show＝嚴重閃爍 reject；(b) WS_CLIPSIBLINGS＝0% reject；(e) 父 WM_ERASEBKGND 填滿＝0%（GDI 已裁）reject |
+| 4 | 灰矩形 | **隨 C 消失**（是 Actions 舊按鈕面殘留；父層擦除控制列＋radio/checkbox 預設 BTNFACE 對齊） |
+| 5 | Snapshot／DPI 回歸 | **零風險**（`v2_snapshot` 只渲染 overlay 畫布；C 的 `WM_PAINT` 座標全走 `Ui_Scale`＋`Compare_Font`） |
+
+**定案對策 C（agy 實作規格）**——僅改 `src/compare_v2.c`：
+1. `cmp_v2_t`：`HWND grp[4]` → `RECT grp_rc[4]`。
+2. `v2_layout`（810–817）：移除 4×`MoveWindow(grp)`，改填 `grp_rc[0..3]`（`gz/gx1/gx2/gx3` × `Ui_Scale(2)`～`+Ui_Scale(V2_GROUP_H)`）。
+3. `WM_CREATE`：移除 4×`CreateWindowExA(BS_GROUPBOX)`、null 檢查（1132）、`WM_SETFONT`（1145–1148）。
+4. `V2WndProc` 新增 `WM_PAINT`：`v2_paint_control_bar()`——`FillRect` 控制列 `[0,0,w,Ui_Scale(V2_TOP_H)]` 為 `COLOR_BTNFACE`；逐組 `DrawEdge(EDGE_ETCHED,BF_RECT)`（`top += 文字高/2` 留標題缺口）＋ `ExtTextOutA(ETO_OPAQUE)` 畫標題（`Compare_Font`、bk=BTNFACE、文字色 BTNTEXT）；**畫於所有子控制項之下**（父視窗 PAINT 先於子視窗，天然在下）。
+5. `WM_SIZE` 的 `RedrawWindow` 保留（換成 `InvalidateRect` 亦可，agy 註明兩者皆可）。
+風格：無 `//`、`_snprintf`、CRLF、`-Wall -Wextra` 零警告。

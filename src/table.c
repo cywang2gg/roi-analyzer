@@ -3,6 +3,8 @@
 #include <commctrl.h>
 #include <stdio.h>
 
+#include "ui_scale.h"
+
 static const char *const g_headers[] = {
     "#", "Rect", "Count", "R mean", "R std", "G mean", "G std",
     "B mean", "B std", "Y mean", "Y std", "L", "a", "b"
@@ -43,7 +45,7 @@ HWND Table_Create(HWND parent, HINSTANCE instance, int control_id)
     col.fmt = LVCFMT_LEFT;
     for (i = 0; i < (int)(sizeof(g_headers) / sizeof(g_headers[0])); i++) {
         col.pszText = (LPSTR)g_headers[i];
-        col.cx = g_widths[i];
+        col.cx = Ui_Scale(g_widths[i]);
         if (ListView_InsertColumn(hwnd, i, &col) == -1) {
             DWORD error = GetLastError();
             char message[160];

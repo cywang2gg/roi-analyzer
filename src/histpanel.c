@@ -9,12 +9,16 @@
 #include <windowsx.h>
 #include <commctrl.h>
 
+#include "ui_scale.h"
+
 #define IDC_HIST_CHANNEL 1
 #define IDC_HIST_LOG     2
 
 typedef struct {
     HWND combo;
     HWND log;
+    HFONT font;
+    int font_height;
     hist_channel_t channel;
     BOOL log_scale;
     histogram_t hist;
@@ -72,28 +76,32 @@ static void update_layout(HWND hwnd, hist_panel_t *panel)
 {
     RECT rc;
     int width, height, graph_bottom;
+    int line_height = panel->font_height ? panel->font_height : Ui_Scale(16);
     GetClientRect(hwnd, &rc);
     width = rc.right;
     height = rc.bottom;
-    SetWindowPos(panel->combo, NULL, 8, 3, width > 160 ? width - 100 : 60, 220,
+    SetWindowPos(panel->combo, NULL, Ui_Scale(8), Ui_Scale(3),
+                 width > Ui_Scale(160) ? width - Ui_Scale(100) :
+                 Ui_Scale(60), Ui_Scale(220),
                  SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(panel->log, NULL, width - 82, 4, 74, 22,
+    SetWindowPos(panel->log, NULL, width - Ui_Scale(82), Ui_Scale(4),
+                 Ui_Scale(74), Ui_Scale(22),
                  SWP_NOZORDER | SWP_NOACTIVATE);
-    panel->graph.left = 8;
-    panel->graph.right = width - 8;
-    panel->graph.top = 52;
-    graph_bottom = height - 132;
-    if (graph_bottom < panel->graph.top + 20)
-        graph_bottom = panel->graph.top + 20;
+    panel->graph.left = Ui_Scale(8);
+    panel->graph.right = width - Ui_Scale(8);
+    panel->graph.top = Ui_Scale(52);
+    graph_bottom = height - (line_height * 6 + Ui_Scale(36));
+    if (graph_bottom < panel->graph.top + Ui_Scale(20))
+        graph_bottom = panel->graph.top + Ui_Scale(20);
     panel->graph.bottom = graph_bottom;
-    panel->ramp.left = 8;
-    panel->ramp.right = width - 8;
-    panel->ramp.top = graph_bottom + 8;
-    panel->ramp.bottom = panel->ramp.top + 10;
-    panel->stats.left = 8;
-    panel->stats.top = panel->ramp.bottom + 8;
-    panel->stats.right = width - 8;
-    panel->stats.bottom = height - 4;
+    panel->ramp.left = Ui_Scale(8);
+    panel->ramp.right = width - Ui_Scale(8);
+    panel->ramp.top = graph_bottom + Ui_Scale(8);
+    panel->ramp.bottom = panel->ramp.top + Ui_Scale(10);
+    panel->stats.left = Ui_Scale(8);
+    panel->stats.top = panel->ramp.bottom + Ui_Scale(8);
+    panel->stats.right = width - Ui_Scale(8);
+    panel->stats.bottom = height - Ui_Scale(4);
 }
 
 static int current_channel_index(hist_channel_t channel)
@@ -361,7 +369,7 @@ static void paint_stats(HDC hdc, hist_panel_t *panel)
 {
     char line[160];
     int y = panel->stats.top;
-    int line_height = 16;
+    int line_height = panel->font_height ? panel->font_height : Ui_Scale(16);
     int ch, channels[4], count = panel->channel == HCH_RGB ? 4 : 1;
     static const char *const short_names[] = { "R", "G", "B", "Y" };
     SetBkMode(hdc, TRANSPARENT);
@@ -499,6 +507,28 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
         update_layout(hwnd, panel);
         return 0;
     }
+    case WM_SETFONT: {
+        HDC hdc;
+        HGDIOBJ old_font;
+        TEXTMETRICA tm;
+        if (panel) {
+            panel->font = (HFONT)wparam;
+            panel->font_height = 0;
+            hdc = GetDC(hwnd);
+            if (hdc) {
+                old_font = SelectObject(hdc, panel->font);
+                if (old_font && old_font != HGDI_ERROR) {
+                    if (GetTextMetricsA(hdc, &tm))
+                        panel->font_height = tm.tmHeight + 1;
+                    SelectObject(hdc, old_font);
+                }
+                ReleaseDC(hwnd, hdc);
+            }
+            update_layout(hwnd, panel);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
     case WM_SIZE:
         if (panel) {
             update_layout(hwnd, panel);
@@ -622,8 +652,14 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
             HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc;
             char source_prefix[] = "Source: ";
+            SIZE prefix_size;
+            int label_x;
             GetClientRect(hwnd, &rc);
             if (ensure_buffers(panel, rc.right, rc.bottom)) {
+                HGDIOBJ old_font;
+                old_font = SelectObject(panel->back_dc,
+                            panel->font ? panel->font :
+                            (HFONT)GetStockObject(DEFAULT_GUI_FONT));
                 if (panel->base_dirty)
                     paint_chart(panel);
                 if (panel->ramp_dirty)
@@ -633,13 +669,18 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
                 SetBkMode(panel->back_dc, TRANSPARENT);
                 SetTextColor(panel->back_dc,
                              GetSysColor(COLOR_WINDOWTEXT));
-                TextOutA(panel->back_dc, 8, 32, source_prefix,
+                GetTextExtentPoint32A(panel->back_dc, source_prefix,
+                                      (int)strlen(source_prefix), &prefix_size);
+                label_x = Ui_Scale(8) + prefix_size.cx + Ui_Scale(6);
+                TextOutA(panel->back_dc, Ui_Scale(8), Ui_Scale(32),
+                         source_prefix,
                          (int)strlen(source_prefix));
                 if (panel->label[0])
-                    TextOutW(panel->back_dc, 56, 32, panel->label,
+                    TextOutW(panel->back_dc, label_x, Ui_Scale(32), panel->label,
                              (int)wcslen(panel->label));
                 else
-                    TextOutA(panel->back_dc, 56, 32, "No image", 8);
+                    TextOutA(panel->back_dc, label_x, Ui_Scale(32),
+                             "No image", 8);
                 BitBlt(panel->back_dc, panel->graph.left, panel->graph.top,
                        panel->graph_width, panel->graph_height,
                        panel->base_dc, 0, 0, SRCCOPY);
@@ -656,6 +697,7 @@ static LRESULT CALLBACK HistPanelWndProc(HWND hwnd, UINT message,
                        panel->ramp_width, panel->ramp_height,
                        panel->ramp_dc, 0, 0, SRCCOPY);
                 paint_stats(panel->back_dc, panel);
+                SelectObject(panel->back_dc, old_font);
                 if (ps.rcPaint.right > ps.rcPaint.left &&
                     ps.rcPaint.bottom > ps.rcPaint.top)
                     BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
