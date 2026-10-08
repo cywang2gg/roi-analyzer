@@ -1,8 +1,10 @@
 # ROI Analyzer — 系統架構設計書
 
-> 版本：v3.5 | 日期：2026-10-07 | UI 高清化（Segoe UI 字型＋dpiAware＋全套版面 DPI 縮放）＋V2 殘影根治；詳見 `ui_font_dpi_architecture.md`（v1.2）、`ui_dpi_layout_architecture.md`（v1.2）、`compareformV1V2_architecture_.md` §15。比較視窗分析模式：三顆 PUSHLIKE 切換鈕（E/T/N），衍生分析圖＋可見區數值＋最佳標示；詳見 `compare_analysis_modes_architecture.md`（v1.0 可執行定稿）。色卡偵測（YOLOv8＋ONNX Runtime）：載入後 1 秒背景偵測、洋紅框疊加、狀態列提示；詳見 `color_chart_detection_architecture.md`（v1.2 定稿）。色卡 24 patch 定位：OpenCV C API（LoadLibrary 動態載入）＋直擺支援（grid 泛化＋標準編號換算）；詳見 `cc_patch_locate_architecture.md`（v1.2）
+> 版本：v3.6 | 日期：2026-10-08 | 標題列版次（`version.h`）＋Histogram 分割條拖曳；詳見 `hist_splitter_architecture.md`（v1.1）。UI 高清化（Segoe UI 字型＋dpiAware＋全套版面 DPI 縮放）＋V2 殘影根治；詳見 `ui_font_dpi_architecture.md`（v1.2）、`ui_dpi_layout_architecture.md`（v1.2）、`compareformV1V2_architecture_.md` §15。比較視窗分析模式：三顆 PUSHLIKE 切換鈕（E/T/N），衍生分析圖＋可見區數值＋最佳標示；詳見 `compare_analysis_modes_architecture.md`（v1.0 可執行定稿）。色卡偵測（YOLOv8＋ONNX Runtime）：載入後 1 秒背景偵測、洋紅框疊加、狀態列提示；詳見 `color_chart_detection_architecture.md`（v1.2 定稿）。色卡 24 patch 定位：OpenCV C API（LoadLibrary 動態載入）＋直擺支援（grid 泛化＋標準編號換算）；詳見 `cc_patch_locate_architecture.md`（v1.2）
 
 ## 變更歷史
+
+- **v3.6（2026-10-08）**：(1) **標題列版次**：新增 `src/version.h`（`APP_VERSION "v3.5"` 單一真實源，`app.h`＋`compare.h` include）；主視窗標題 3 分支、V1 `Compare Files v3.5`、V2 動態標題 `Compare v3.5 - L:…|R:…`。(2) **Histogram 分割條拖曳**（`hist_splitter_architecture.md` v1.1，agy 兩輪 review：R1 NO-GO 五項 Must-Fix、R2 GO＋五項實作注意）：`canvas.c` 右緣 6px splitter（擊中須面板可見 MF2、置於空圖守衛前 MF1、`WM_SETCURSOR` 唯一設游標 MF4、僅拖曳中攔 MOUSEMOVE）；`Layout()` 無條件下限 clamp（MF3）＋`g_app.hist_width` 偏好；`settings.[Layout]HistWidth` 存 96dpi 邏輯值（`App_Layout` wrapper 供 canvas 呼叫）。面板元件 reflow 零改動、畫布不變形、表格欄原生可拖。**驗證**：零警告、`ctest` 2/2、使用者手測通過。
 
 - **v3.5（2026-10-07）**：UI 高清化三部曲。(1) **字型統一＋DPI awareness**（`ui_font_dpi_architecture.md` v1.2，agy 兩輪 review）：file-static `s_ui_font`（Segoe UI 9pt ClearType，`LOGFONTA`）＋`App_SetControlFont`（`EnumChildWindows`＋`WM_SETFONT`，`Layout()` 前）＋histpanel `WM_SETFONT`（`GetTextMetricsA` 字高）＋owner-draw 狀態列第 3 區存還原＋WinMain 訊息迴圈後 `DeleteObject`＋`app.manifest` `<dpiAware>true</dpiAware>`（本機 216dpi=225%）；CMake 加 `app.rc`→`app.manifest` `OBJECT_DEPENDS`（manifest 變更觸發 windres）。(2) **全套版面 DPI 縮放**（`ui_dpi_layout_architecture.md` v1.2，agy 兩輪 review 12 項）：新增 `src/ui_scale.h`（`Ui_Scale(px)=MulDiv(px,dpi,96)`，100% 恆等）；`main.c`（`Layout`/`App_StatusLayout`/MINMAX 640×480）、`histpanel.c`（`update_layout`/動態標籤）、`table.c`（欄寬）、`compare_v1.c`（工具列/狀態文字/MINMAX 720×400）、`compare_v2.c`（全常數/Zoom label 64/MINMAX 900×420）全面 `Ui_Scale` 化，比例式不動。(3) **V2 殘影根治**（`compareformV1V2_architecture_.md` §15 v1.2，codex＋agy review）：最大化後群組框標題重影根因＝「擦除真空」（父 `WS_CLIPCHILDREN` 排除子矩形＋`BS_GROUPBOX` 不填內部）；對策 A（`RDW_ALLCHILDREN`）實測失敗後採 **C**——移除 4 個 `BS_GROUPBOX` 子視窗，改父視窗 `WM_PAINT` 以 `DrawEdge(EDGE_ETCHED)`＋`ExtTextOutA(ETO_OPAQUE)` 自繪；`cmp_v2_t.grp` → `grp_rc[4]`。另 V1/V2 頂層 `WM_SIZE` 補重畫、`V2_GROUP_H` 64→68、V2 Zoom label 寬 32→64（容 `L: 800%`）。**驗證**：零警告、`ctest` 2/2、使用者手測 225% 字型清晰＋版面 fit＋最大化殘影消失。新增 `docs/histogram_view_scale_notes.md`（histogram 顯示比例算式，供移植）。
 
@@ -92,6 +94,7 @@ roi-analyzer/
 │   ├── export.h/.c    # CSV 匯出
 │   ├── app_messages.h # WM_APP 自訂訊息集中管理（+104/+105 偵測，v3.3）
 │   ├── ui_scale.h     # UI 版面 DPI 縮放：Ui_Scale/MulDiv(px,dpi,96)（v3.5）
+│   ├── version.h      # APP_VERSION 單一真實源，標題列版次（v3.6）
 │   ├── yolo_post.h/.c # letterbox／NCHW／YOLOv8 解碼／NMS／座標還原，純計算零 Win32 依賴（v3.3）
 │   ├── yolo_ort.h/.c  # onnxruntime.dll 動態載入＋session＋Run（v3.3）
 │   ├── detect.h/.c    # 偵測狀態機＋Timer＋UI 公開 API（v3.3）

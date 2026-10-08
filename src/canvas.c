@@ -7,6 +7,8 @@
 #include "app.h"
 #include "app_messages.h"
 #include "detect.h"
+#include "settings.h"
+#include "ui_scale.h"
 
 #define WM_CANVAS_BUILD_PYRAMID (WM_APP + 1)
 
@@ -14,6 +16,20 @@ static BOOL g_panning;
 static POINT g_pan_last;
 static DWORD s_last_preview_tick;
 static BOOL s_has_preview;
+static BOOL s_splitting;
+static int s_split_start_x;
+static int s_split_start_hist;
+
+static BOOL splitter_hit(HWND hwnd, POINT pt)
+{
+    RECT rc;
+
+    if (!g_app.hwnd_hist || !IsWindowVisible(g_app.hwnd_hist))
+        return FALSE;
+    if (!GetClientRect(hwnd, &rc))
+        return FALSE;
+    return pt.x >= rc.right - Ui_Scale(6);
+}
 
 void Canvas_NavigationStarted(void)
 {
@@ -218,6 +234,16 @@ BOOL Canvas_Register(HINSTANCE instance)
 LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
+    case WM_SETCURSOR: {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        if (s_splitting || splitter_hit(hwnd, pt)) {
+            SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+            return 1;
+        }
+        break;
+    }
     case WM_TIMER:
         if (wparam == IDT_DETECT_DELAY) {
             if (!PostMessageA(g_app.hwnd_main, WM_TIMER, wparam, 0))
@@ -238,6 +264,16 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
         return 1;
     case WM_LBUTTONDOWN: {
         POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        POINT pt = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        if (splitter_hit(hwnd, pt)) {
+            s_splitting = TRUE;
+            s_split_start_x = pt.x;
+            s_split_start_hist = g_app.hist_width > 0 ?
+                                 g_app.hist_width :
+                                 Ui_Scale(HISTPANEL_DEF_WIDTH);
+            SetCapture(hwnd);
+            return 0;
+        }
         App_FlushPending();
         if (!g_app.img.valid)
             return 0;
@@ -260,6 +296,24 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_MOUSEMOVE: {
         POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        if (s_splitting) {
+            RECT rc_main, rc;
+            int delta, new_hist, upper;
+            GetClientRect(g_app.hwnd_main, &rc_main);
+            GetClientRect(hwnd, &rc);
+            delta = p.x - s_split_start_x;
+            new_hist = s_split_start_hist - delta;
+            if (new_hist < Ui_Scale(HISTPANEL_MIN_WIDTH))
+                new_hist = Ui_Scale(HISTPANEL_MIN_WIDTH);
+            upper = rc_main.right - Ui_Scale(320);
+            if (new_hist > upper)
+                new_hist = upper;
+            if (new_hist != g_app.hist_width) {
+                g_app.hist_width = new_hist;
+                App_Layout();
+            }
+            return 0;
+        }
         if (g_panning) {
             RECT rc;
             GetClientRect(hwnd, &rc);
@@ -299,9 +353,16 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
     case WM_LBUTTONUP: {
         POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
         BOOL was_click = FALSE;
-        BOOL had_drag = g_app.drag.dragging;
-        BOOL changed = ROI_OnLUp(&g_app.rois, &g_app.drag, &g_app.img,
-                                 &g_app.view, p, &was_click);
+        BOOL had_drag;
+        BOOL changed;
+        if (s_splitting) {
+            s_splitting = FALSE;
+            ReleaseCapture();
+            Settings_SaveHistWidth(MulDiv(g_app.hist_width, 96, Ui_Dpi()));
+        }
+        had_drag = g_app.drag.dragging;
+        changed = ROI_OnLUp(&g_app.rois, &g_app.drag, &g_app.img,
+                            &g_app.view, p, &was_click);
         if (had_drag) {
             ReleaseCapture();
             if (changed && was_click)
@@ -315,6 +376,13 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
         }
         return 0;
     }
+    case WM_CAPTURECHANGED:
+        if (s_splitting) {
+            s_splitting = FALSE;
+            ReleaseCapture();
+            Settings_SaveHistWidth(MulDiv(g_app.hist_width, 96, Ui_Dpi()));
+        }
+        return 0;
     case WM_RBUTTONDOWN:
         if (g_app.img.valid) {
             g_panning = TRUE;

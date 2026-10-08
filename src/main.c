@@ -253,20 +253,21 @@ static void UpdateTitle(void)
     if (g_app.img.valid) {
         if (g_current_exact)
             _snprintf(title, sizeof(title),
-                      "ROI Analyzer - %s %dx%d [%d/%d] [%s] [%s]%s",
+                      "ROI Analyzer " APP_VERSION " - %s %dx%d [%d/%d] [%s] [%s]%s",
                       image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
                       g_app.file_idx + 1, g_app.files.count,
                       ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single",
                       g_app.is_modified ? " *" : "");
         else
             _snprintf(title, sizeof(title),
-                      "ROI Analyzer - %s %dx%d [%s/%d] [%s] [%s]%s",
+                      "ROI Analyzer " APP_VERSION " - %s %dx%d [%s/%d] [%s] [%s]%s",
                       image_basename(g_app.img.path), g_app.img.w, g_app.img.h,
                       dash, g_app.files.count, ROI_ModeLabel(g_app.mode),
                       g_app.multi ? "Multi" : "Single",
                       g_app.is_modified ? " *" : "");
     } else {
-        _snprintf(title, sizeof(title), "ROI Analyzer - (open or drop an image) [%s] [%s]",
+        _snprintf(title, sizeof(title),
+                  "ROI Analyzer " APP_VERSION " - (open or drop an image) [%s] [%s]",
                   ROI_ModeLabel(g_app.mode), g_app.multi ? "Multi" : "Single");
     }
     title[sizeof(title) - 1] = '\0';
@@ -1069,7 +1070,10 @@ static void Layout(void)
     width = client.right;
     show_panel = g_app.show_hist && width >= Ui_Scale(520);
     if (show_panel) {
-        hist_width = Ui_Scale(HISTPANEL_DEF_WIDTH);
+        hist_width = g_app.hist_width > 0 ?
+                     g_app.hist_width : Ui_Scale(HISTPANEL_DEF_WIDTH);
+        if (hist_width < Ui_Scale(HISTPANEL_MIN_WIDTH))
+            hist_width = Ui_Scale(HISTPANEL_MIN_WIDTH);
         if (width - hist_width < Ui_Scale(320)) {
             hist_width = width - Ui_Scale(320);
             if (hist_width < Ui_Scale(HISTPANEL_MIN_WIDTH))
@@ -1119,6 +1123,11 @@ static void Layout(void)
                  width, tabs_height, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g_app.hwnd_table, NULL, 0, canvas_height + button_height + tabs_height,
                  width, table_height - tabs_height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void App_Layout(void)
+{
+    Layout();
 }
 
 static BOOL OpenImageFile(const char *path)
@@ -2635,7 +2644,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     };
     MSG msg;
     int screen_width, screen_height, width, height, x, y;
-    int result;
+    int result, logical = 0;
     DWORD s_nav_done_tick;
     HRESULT com_result;
     locate_options_t locate_options;
@@ -2650,6 +2659,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
             g_ui_dpi = 96;
     }
     memset(&g_app, 0, sizeof(g_app));
+    (void)Settings_LoadHistWidth(&logical);
+    g_app.hist_width = logical > 0 ? Ui_Scale(logical) : 0;
     g_app.file_idx = -1;
     com_result = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(com_result)) {

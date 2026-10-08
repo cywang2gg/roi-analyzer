@@ -3,6 +3,7 @@
 
 #include "image.h"
 #include "view.h"
+#include "version.h"
 #include <stddef.h>
 
 #define CMP_ZOOM_MIN      0.02

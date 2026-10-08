@@ -9,6 +9,7 @@
 #include "filelist.h"
 #include "roi.h"
 #include "view.h"
+#include "version.h"
 
 #define IDM_COMPARE_FILES 155
 #define IDM_COMPARE_NEXT  156
@@ -32,6 +33,7 @@ typedef struct {
     roi_mode_t table_page;
     BOOL multi;
     BOOL show_hist;
+    int hist_width;
     BOOL locate_enabled;
     BOOL show_patch_grid;
     BOOL locate_result_valid;
@@ -55,5 +57,6 @@ void App_StatusLayout(void);
 void App_StatusSetIndex(void);
 void App_UpdateHistogram(void);
 void App_PreviewHistogram(RECT img_rc);
+void App_Layout(void);
 
 #endif

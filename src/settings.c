@@ -130,3 +130,30 @@ BOOL Settings_SaveLocateOptions(const locate_options_t *options)
     return WritePrivateProfileStringA("locate", "enabled", enabled, ini) &&
            WritePrivateProfileStringA("locate", "show_grid", show_grid, ini);
 }
+
+BOOL Settings_LoadHistWidth(int *logical_width)
+{
+    char ini[MAX_PATH];
+
+    if (!logical_width)
+        return FALSE;
+    *logical_width = 0;
+    Settings_GetIniPath(ini, sizeof(ini));
+    if (ini[0] == '\0')
+        return FALSE;
+    *logical_width = GetPrivateProfileIntA("Layout", "HistWidth", 0, ini);
+    return TRUE;
+}
+
+BOOL Settings_SaveHistWidth(int logical_width)
+{
+    char ini[MAX_PATH];
+    char value[16];
+
+    Settings_GetIniPath(ini, sizeof(ini));
+    if (ini[0] == '\0')
+        return FALSE;
+    _snprintf(value, sizeof(value), "%d", logical_width);
+    value[sizeof(value) - 1] = '\0';
+    return WritePrivateProfileStringA("Layout", "HistWidth", value, ini);
+}

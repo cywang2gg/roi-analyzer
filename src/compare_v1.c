@@ -1446,7 +1446,7 @@ HWND CompareV1_Open(cmp_image_t **images, int count)
         x = CW_USEDEFAULT;
         y = CW_USEDEFAULT;
     }
-    hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, V1_CLASS, "Compare Files",
+    hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, V1_CLASS, "Compare Files " APP_VERSION,
                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                            x, y, width, height, NULL, NULL,
                            GetModuleHandleA(NULL), state);

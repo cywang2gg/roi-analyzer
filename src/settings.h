@@ -18,5 +18,7 @@ BOOL Settings_LoadLastRenamePrefix(char *prefix, size_t cap);
 BOOL Settings_SaveLastRenamePrefix(const char *prefix);
 BOOL Settings_LoadLocateOptions(locate_options_t *options);
 BOOL Settings_SaveLocateOptions(const locate_options_t *options);
+BOOL Settings_LoadHistWidth(int *logical_width);
+BOOL Settings_SaveHistWidth(int logical_width);
 
 #endif

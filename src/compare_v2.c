@@ -415,7 +415,7 @@ static void v2_update_status(cmp_v2_t *state)
 static void v2_update_title(cmp_v2_t *state)
 {
     char title[MAX_PATH * 2 + 40];
-    _snprintf(title, sizeof(title), "Compare - L: %s | R: %s",
+    _snprintf(title, sizeof(title), "Compare " APP_VERSION " - L: %s | R: %s",
               state->image[v2_image_index(state, 0)]->name,
               state->image[v2_image_index(state, 1)]->name);
     title[sizeof(title) - 1] = '\0';
@@ -1484,7 +1484,7 @@ HWND CompareV2_OpenMode(cmp_image_t *left, cmp_image_t *right,
             height = info.rcWork.bottom - info.rcWork.top;
         }
     }
-    hwnd = CreateWindowExA(0, V2_CLASS, "Compare",
+    hwnd = CreateWindowExA(0, V2_CLASS, "Compare " APP_VERSION,
                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                            x, y, width, height, NULL, NULL,
                            GetModuleHandleA(NULL), state);
