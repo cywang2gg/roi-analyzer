@@ -1,0 +1,23 @@
+Review the DPI layout scaling architecture doc for a pure C Win32 GDI app (roi-analyzer, C:/Github/roi-analyzer).
+
+CONTEXT: A previous change added a Segoe UI font + <dpiAware>true</dpiAware> manifest. User reports UI text is now crisp but the LAYOUT does not fit: text is too big for the hardcoded pixel layout. Measured system DPI = 216 (225% scaling).
+
+READ:
+1. docs/ui_dpi_layout_architecture.md (the doc under review)
+2. src/main.c - Layout() ~1045-1105, App_StatusLayout() ~626-660, WinMain ~2639, WM_CREATE ~2174-2252
+3. src/histpanel.c - update_layout() ~71-97
+4. src/table.c - g_widths[] ~11-13, Table_Create ~24-59
+5. src/compare_v1.c - V1_TOOLBAR_H ~14, v1_layout, button creation ~1127-1151
+6. src/compare_v2.c - V2_TOP_H/V2_GROUP_H/V2_BOTTOM_H ~13-15, v2_layout, WM_GETMINMAXINFO ~1152
+7. src/app.manifest (verify dpiAware present)
+
+VERIFY (file:line evidence for each):
+1. Is RC correct? Is system DPI 216 consistent with the reported symptom (font scaled, layout not)?
+2. Is the Ui_Scale/MulDiv approach correct for a DPI-aware app? Any better/standard alternative?
+3. Is the enumerated constant list COMPLETE? Grep for hardcoded pixel literals in layout functions that the doc MISSED (e.g. status bar part widths, tab/table heights, listview column widths, group box sizes, trackbar sizes, close button geometry, status band height). List every miss with file:line.
+4. `ui_scale.h` declaring Ui_Dpi/Ui_Scale with definitions in main.c: does table.c / histpanel.c / compare_v1.c / compare_v2.c already include a header that could cause a circular include or a missing-declaration warning under -Wall -Wextra? Is a separate small header the cleanest, or should it go in an existing header (app.h)?
+5. Table columns at 225%: sum of Ui_Scale(widths) ~2324px - does it exceed a typical maximized window at 225%? Should columns be proportional or capped?
+6. Any layout that uses BOTH proportional math AND fixed offsets where only the fixed part should scale - did the doc correctly separate them? Check v2_layout and Layout().
+7. Any NEW risk: g_ui_dpi init timing vs first Layout() call; WM_GETMINMAXINFO absent in main.c (doc says "if any")?
+
+OUTPUT: verdict table (item / verdict / file:line evidence / fix). Round 1 of max 2. Evaluate-only: modify NOTHING.

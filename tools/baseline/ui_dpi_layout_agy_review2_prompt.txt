@@ -1,0 +1,21 @@
+Review ROUND 2 (final) of the DPI layout scaling architecture doc v1.1 for roi-analyzer (C:/Github/roi-analyzer).
+
+Round 1 found 7 issues (all adopted into v1.1): C1 histpanel WM_PAINT text coords, C2 v1_render status text margins, C3 v2 pan_right offset, C4 v2 A/B label coords, C5 embedded offsets in proportional math, C6 histpanel combo thresholds, C7 missing WM_GETMINMAXINFO in main.c + compare_v1.c, C8 v2 split line width. Verify the v1.1 revisions are CORRECT and introduce NO new problems, then give final GO/NO-GO.
+
+READ:
+1. docs/ui_dpi_layout_architecture.md (v1.1)
+2. src/main.c (Layout ~1045-1105, App_StatusLayout ~626, WM_GETMINMAXINFO absent)
+3. src/histpanel.c (update_layout ~71-97, WM_PAINT text ~660-672)
+4. src/compare_v1.c (v1_render ~453-466, WM_SIZE ~1182-1190, WM_CREATE ~1124)
+5. src/compare_v2.c (v2_layout ~790-855, v2_render ~620-645 and split line ~560-575, WM_GETMINMAXINFO ~1150)
+
+VERIFY SPECIFICALLY:
+1. Is the doc's C1 fix (GetTextExtentPoint32A dynamic label x) the correct approach? Any simpler correct alternative given the panel already has a font selected into back_dc?
+2. C7: adding WM_GETMINMAXINFO to main.c - is min 640x480 (scaled) sensible? Will it conflict with the initial window size (screen_width/2)? Does compare_v1 need the handler in V1WndProc (which WndProc - the top-level)?
+3. C2: is 25 the right base value (close_rect width 20 + 5 margin)? Check v1_layout close_rect geometry.
+4. C3: is 82 = 8+70+4 the correct composite? Verify against pan_left (gx1+8, w=70).
+5. C4: v2_render non-snapshot label rects - are ALL hardcoded literals in that block now enumerated (8, 32, and the right label)?
+6. Any hardcoded layout literal STILL missed in the doc's lists (do a final grep of layout functions)?
+7. Does v1.1 introduce any double-scaling risk (a value scaled twice) or a scaled value fed into a proportional computation incorrectly?
+
+OUTPUT: round-2 verdict table + final GO / NO-GO with any remaining must-fix. Evaluate-only, change NOTHING.

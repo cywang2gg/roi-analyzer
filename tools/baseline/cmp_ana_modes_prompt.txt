@@ -1,0 +1,23 @@
+You are implementing feature code in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, no // comments, CRLF line endings).
+
+READ FIRST (all of it):
+1. docs/compare_analysis_modes_architecture.md -- the complete executable spec (v1.0). Implement sections 5, 6, 7, 8, 9 EXACTLY as written, including the R1-R8 revisions (they override the original proposal text quoted inside).
+2. src/compare.h, src/compare_image.c, src/compare_core.c, src/compare_v1.c, src/compare_v2.c, src/image.h, src/analyze.h, CMakeLists.txt -- the real code anchor points named in the doc.
+
+SCOPE (section 12 of the doc, in order):
+1. compare.h additions (section 5 verbatim: enum, struct, constants, V1_ID_ANA_* 4105-4107, V2_ID_ANA_* 4211-4213, CMP_TID_METRIC, OpenMode declaration).
+2. compare_image.c: CmpImage_Adopt + Unref chaining (section 6).
+3. compare_analysis.c NEW FILE: copy section 7 logic with the 4 MANDATORY changes (rgb_to_lab_f from analyze.h, decoder[8] in alloc_like, CmpAna_VisibleSrcImage instead of CmpView_VisibleSrc, keep thresholds); hist array via calloc/free (not 8KB stack); _snprintf + manual NUL (never snprintf).
+4. compare_v1.c: section 8 verbatim (real field names: cells[].image, state->count, state->message, state->locked; toolbar coords in R6 table; v1_open_v2 calls CompareV2_OpenMode).
+5. compare_v2.c: section 9 verbatim (real names: image[2], view[2], swapped via v2_image_index, grp[3]->grp[4], v2_layout 4-way split, min width 760->900, OpenMode wrapper impl).
+6. CMakeLists.txt: append compare_analysis.c to the roi_analyzer sources. Add #include "analyze.h" in compare_analysis.c.
+
+HARD BANS (violating any = reject):
+- Do NOT touch src/main.c (0 lines; existing CompareV2_Open callers stay as-is).
+- Do NOT touch Cmp_Blit, CmpView_VisibleRect, CmpView_ScreenToImage, manifest, Export, or any file not listed above.
+- Do NOT use snprintf (use _snprintf + buf[sizeof-1]='\0'); do NOT use // comments; do NOT use stdbool; do NOT use strncpy.
+- Do NOT invent struct field names: use ONLY the real names from section R3 of the doc (cells[].image, image_rect, count, swapped, split_fraction, track[2], etc.).
+- Do NOT commit, do NOT push, do NOT verify with builds or smoke runs. Only write code.
+- Keep CRLF line endings in every file you create or edit.
+
+DONE CRITERIA: all 6 scope items written; `git status --short` shows ONLY: M compare.h, M compare_image.c, M compare_v1.c, M compare_v2.c, M CMakeLists.txt, ?? compare_analysis.c (plus the untouched arch doc). Report the file list and stop.

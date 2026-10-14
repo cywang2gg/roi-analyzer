@@ -1,0 +1,24 @@
+Review ROUND 2 (final, max 2 rounds) of docs/hist_splitter_architecture.md (now v1.1) for roi-analyzer (C:/Github/roi-analyzer).
+
+Round 1 verdict was NO-GO with 5 must-fixes (all claimed merged into v1.1):
+- MF1: splitter WM_LBUTTONDOWN check must come BEFORE canvas's `if (!g_app.img.valid) return 0;` guard (empty image must still allow dragging).
+- MF2: hit-test must include `g_app.hwnd_hist && IsWindowVisible(g_app.hwnd_hist)` (avoid ghost splitter when panel hidden).
+- MF3: Layout() must unconditionally clamp `hist_width >= Ui_Scale(HISTPANEL_MIN_WIDTH)` after reading g_app.hist_width (existing clamp only lives in the canvas<320 branch; wide window + bad ini value breaks layout).
+- MF4: cursor ONLY in WM_SETCURSOR; WM_MOUSEMOVE early-return ONLY while dragging (normal hover must keep calling App_UpdateStatus at canvas.c:296).
+- MF5: line ref corrected to histpanel.c:781-786.
+
+READ:
+1. docs/hist_splitter_architecture.md v1.1 (full)
+2. src/canvas.c ~235-330 (guard order, MOUSEMOVE status update, SETCURSOR absence)
+3. src/main.c Layout() ~1055-1105 (clamp chain)
+4. src/settings.h/.c (Load/Save pattern)
+
+VERIFY:
+1. Are MF1-MF5 accurately and COMPLETELY merged into the v1.1 body (sections 1.1, 2.1, 2.2)? Quote any spot where old v1.0 wording survived contradicting a must-fix.
+2. Is the splitter-hit helper spec (v1_splitter_hit) correct Win32 C? any missing declaration-at-top issue, IsWindowVisible timing during drag (panel hidden mid-drag)?
+3. MF3 placement: is unconditional clamp before or after the canvas>=320 check in the doc's pseudo-code? Does it conflict with the hide-panel path (width-hist<200)?
+4. Does §2.1 handle WM_SETCURSOR for the hist panel side (splitter only in canvas - asymmetric hit noted by round 1 as acceptable tradeoff)? Acceptable?
+5. Any NEW problem introduced by v1.1 edits (e.g. v1_splitter_hit uses g_app - does canvas.c already include app.h? check).
+6. Final GO / NO-GO for gh dispatch with any remaining must-fix.
+
+OUTPUT: numbered verdicts + final GO/NO-GO. Evaluate-only, change NOTHING.

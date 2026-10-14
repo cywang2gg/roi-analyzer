@@ -1,0 +1,18 @@
+Fix V2 compare window group-box caption ghosting on maximize in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, NO // comments, CRLF line endings).
+
+BACKGROUND: docs/compareformV1V2_architecture_.md section 15 documents the bug and an external review (section 15.6). After maximizing the V2 window, group box captions show leftover glyph fragments ("FPan Sync", "AActions", "iAnalyze"). Confirmed cause (H2): the top-level window has WS_CLIPCHILDREN, so InvalidateRect on the parent never refreshes child windows; the four BS_GROUPBOX children (siblings of the inner controls, no WS_CLIPSIBLINGS) keep stale pixels from their old positions after v2_layout moves them.
+
+IMPLEMENT (countermeasure A, section 15.4):
+In src/compare_v2.c, top-level V2WndProc WM_SIZE handler (around line 1190), REPLACE the existing line:
+    InvalidateRect(hwnd, NULL, TRUE);
+WITH:
+    RedrawWindow(hwnd, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+(indentation: match surrounding code, C style, line continuation aligned). That is the ONLY change in this task.
+
+HARD BANS:
+- Only touch src/compare_v2.c; exactly one call replacement.
+- No other countermeasures (no WM_CTLCOLOR, no WS_EX_COMPOSITED, no group box rewrite).
+- Do NOT commit, push, or run builds/smoke. Keep CRLF.
+
+DONE: the one replacement done; report the changed line number and stop.

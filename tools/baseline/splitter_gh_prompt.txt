@@ -1,0 +1,36 @@
+Implement the histogram splitter drag feature in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, NO // comments, CRLF line endings).
+
+READ FIRST: docs/hist_splitter_architecture.md v1.1 (fully reviewed, GO) - implement sections 2.1, 2.2, 2.3, section 3 file scope AND the 5 agy round-2 implementation notes in section 3.
+
+SUMMARY: A draggable vertical splitter between the image canvas and the histogram panel (canvas right edge, 6px band). Dragging sets the panel width; persists to ini.
+
+IMPLEMENT (5 files only):
+
+1. src/settings.h/.c - add per existing pattern:
+   BOOL Settings_LoadHistWidth(int *logical_width);  /* [Layout] HistWidth, 96dpi logical px; 0 or missing -> *out=0, return TRUE */
+   BOOL Settings_SaveHistWidth(int logical_width);
+
+2. src/app.h: add field `int hist_width;` to app_t (0 = use default 300); add declaration `void App_Layout(void);`.
+
+3. src/main.c:
+   - Implement `void App_Layout(void) { Layout(); }` near Layout.
+   - In WinMain after g_ui_dpi is set: int logical = 0; Settings_LoadHistWidth(&logical); g_app.hist_width = logical > 0 ? Ui_Scale(logical) : 0;
+   - Layout() hist_width block per doc section 2.2: if show_panel { hist_width = g_app.hist_width > 0 ? g_app.hist_width : Ui_Scale(HISTPANEL_DEF_WIDTH); /* MF3 unconditional floor */ if (hist_width < Ui_Scale(HISTPANEL_MIN_WIDTH)) hist_width = Ui_Scale(HISTPANEL_MIN_WIDTH); ...existing clamp chain unchanged... }
+
+4. src/canvas.c:
+   - Add #include "ui_scale.h".
+   - Add file-static splitter state: BOOL s_splitting; int s_split_start_x; int s_split_start_hist;
+   - static BOOL splitter_hit(HWND hwnd, POINT pt): return FALSE if (!g_app.hwnd_hist || !IsWindowVisible(g_app.hwnd_hist)); GetClientRect(hwnd,&rc); return pt.x >= rc.right - Ui_Scale(6);
+   - WM_SETCURSOR (new case BEFORE default fall-through): POINT pt; GetCursorPos(&pt); ScreenToClient(hwnd,&pt); if (s_splitting || splitter_hit(hwnd,pt)) { SetCursor(LoadCursor(NULL, IDC_SIZEWE)); return 1; } break; /* else original behavior */
+   - WM_LBUTTONDOWN: FIRST (before the existing `if (!g_app.img.valid) return 0;`): POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; if (splitter_hit(hwnd, pt)) { s_splitting = TRUE; s_split_start_x = pt.x; s_split_start_hist = g_app.hist_width > 0 ? g_app.hist_width : Ui_Scale(HISTPANEL_DEF_WIDTH); SetCapture(hwnd); return 0; }
+   - WM_MOUSEMOVE: at TOP, if (s_splitting) { compute: GetClientRect(g_app.hwnd_main,&rc_main) for upper clamp; canvas client width via GetClientRect(hwnd,&rc); delta = pt.x - s_split_start_x; new_hist = s_split_start_hist - delta; clamp: if (new_hist < Ui_Scale(HISTPANEL_MIN_WIDTH)) new_hist = Ui_Scale(HISTPANEL_MIN_WIDTH); int upper = rc_main.right - Ui_Scale(320); if (new_hist > upper) new_hist = upper; if (new_hist != g_app.hist_width) { g_app.hist_width = new_hist; App_Layout(); } return 0; } /* MF4: ONLY during drag early-return; normal hover continues to App_UpdateStatus */
+   - WM_LBUTTONUP + WM_CAPTURECHANGED: if (s_splitting) { s_splitting = FALSE; ReleaseCapture(); Settings_SaveHistWidth(MulDiv(g_app.hist_width, 96, Ui_Dpi())); } then original handling.
+
+5. IMPORTANT: match each handler's existing structure (check whether canvas WndProc has WM_SETCURSOR already, and where the img.valid guard is, and whether WM_LBUTTONUP/CAPTURECHANGED exist for ROI drag - integrate without breaking ROI behavior).
+
+HARD BANS:
+- Only the 5 files above. Do NOT touch histpanel.c, table.c, ui_scale.h, version.h, or docs.
+- No // comments; no snprintf (use _snprintf); declarations at block top; keep CRLF.
+- Do NOT commit, push, or run builds/smoke. Only write code.
+
+DONE: report changed files + line ranges and stop.

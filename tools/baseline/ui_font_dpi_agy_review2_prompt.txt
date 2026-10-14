@@ -1,0 +1,19 @@
+Review ROUND 2 (final) of the UI modernization architecture doc v1.1 for roi-analyzer (pure C Win32 GDI, C:/Github/roi-analyzer).
+
+Round 1 found 5 issues (V4/V5/V6/V8/V9/V10/V11) - all were adopted into v1.1. Your job now: verify the v1.1 revisions are CORRECT and introduce NO new problems, then give a final GO/NO-GO.
+
+READ:
+1. docs/ui_font_dpi_architecture.md (v1.1 - the revised doc)
+2. src/main.c (WM_CREATE ~2174-2252, WM_DRAWITEM ~2259, WinMain ~2604 and ~2731)
+3. src/histpanel.c (hist_panel_t struct ~15-48, update_layout ~71-97, paint_stats ~360-420, WM_PAINT ~619-671)
+4. src/app.manifest
+
+VERIFY SPECIFICALLY (v1.1 changes):
+1. V6 fix: is `static HFONT s_ui_font;` at main.c file scope reachable from both MainWndProc (WM_CREATE) and WinMain? Any name collision with existing globals?
+2. V4 fix (P1-c): the plan adds `HFONT font; int font_height;` to hist_panel_t and a WM_SETFONT case. Check: (a) does HistPanelWndProc currently fall through to DefWindowProc for WM_SETFONT (so adding a case is clean)? (b) does paint_stats/update_layout use a hardcoded line height 16 that must change? (c) is `panel->back_dc` the right DC to select the font into, and is it created in ensure_buffers before first paint?
+3. V9 fix: is the WinMain post-message-loop location (near DestroyAcceleratorTable) actually after all windows destroyed? Is DeleteObject there safe?
+4. V10 fix: is calling App_SetControlFont before Layout() (line 2251) correct given controls are created 2178-2233? Will the status bar resize correctly?
+5. V11 fix: WM_DRAWITEM owner-draw - does selecting s_ui_font into draw->hDC then not restoring cause issues? (WM_DRAWITEM hDC is managed by system.)
+6. Any NEW problem introduced by v1.1 that round 1 did not catch?
+
+OUTPUT: round-2 verdict table + final GO / NO-GO with any remaining must-fix. Evaluate-only, change NOTHING.

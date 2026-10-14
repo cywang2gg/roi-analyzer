@@ -1,0 +1,24 @@
+Implement countermeasure C for V2 group-box ghosting in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, NO // comments, CRLF line endings).
+
+BACKGROUND: docs/compareformV1V2_architecture_.md section 15 documents the bug (maximize ghosting "FPan Sync"/"AActions"/"iAnalyze" + gray patch) and section 15.8 gives the final reviewed spec: the 4 BS_GROUPBOX child windows create an "erase void" (parent WS_CLIPCHILDREN excludes their rects from erasing; BUTTON class never fills its own interior) so stale pixels live on the parent layer forever. Countermeasure C removes the group box child HWNDs and draws the frames/captions in the parent WM_PAINT.
+
+READ FIRST: docs/compareformV1V2_architecture_.md sections 15.4 and 15.8; src/compare_v2.c (cmp_v2_t ~31-77, v2_layout ~786-866, V2WndProc ~1033-1402, WM_CREATE ~1043-1148, WM_SIZE ~1190).
+
+IMPLEMENT (src/compare_v2.c ONLY, per section 15.8 spec):
+1. In cmp_v2_t: replace `HWND grp[4];` with `RECT grp_rc[4];` (update any references found by grep - all state->grp[...] usages).
+2. v2_layout: replace the 4 MoveWindow(state->grp[k], ...) calls with assignments filling state->grp_rc[0..3]: {left=gz/gx1/gx2/gx3, top=Ui_Scale(2), right=left+zoom_w/pan_w/act_w/ana_w, bottom=Ui_Scale(2)+Ui_Scale(V2_GROUP_H)}.
+3. WM_CREATE: remove the 4 CreateWindowExA(BS_GROUPBOX) blocks, the grp null checks, and the 4 WM_SETFONT sends for grp.
+4. Add to V2WndProc: case WM_PAINT with BeginPaint/EndPaint calling a new helper v2_paint_control_bar(state, dc):
+   - GetClientRect; FillRect bar area [0,0,client.right,Ui_Scale(V2_TOP_H)] with (HBRUSH)(COLOR_BTNFACE+1).
+   - static const char *titles[4] = {"Zoom","Pan & Sync","Actions","Analyze"};
+   - For each k: skip if grp_rc[k].right<=left; SelectObject(dc, Compare_Font()); GetTextExtentPoint32A for title; frame_rc=grp_rc[k] with frame_rc.top += text_sz.cy/2 (gap for caption); DrawEdge(dc,&frame_rc,EDGE_ETCHED,BF_RECT); text rect = {left+Ui_Scale(8), top, left+Ui_Scale(8)+cx+Ui_Scale(4), top+cy}; SetBkMode OPAQUE, SetBkColor COLOR_BTNFACE, SetTextColor COLOR_BTNTEXT, ExtTextOutA(ETO_OPAQUE) at {left+Ui_Scale(10), top}; restore font.
+   - Declarations at block top (C89 style).
+5. WM_SIZE: keep the existing RedrawWindow call as-is (do not touch it).
+
+HARD BANS:
+- Only touch src/compare_v2.c. Do NOT touch compare_snap.c, compare_v1.c, ui_scale.h, or any other file.
+- Do NOT remove or alter any interactive control (labels, tracks, buttons, radios stay children of hwnd).
+- No // comments; no snprintf (use _snprintf if needed); no strncpy. Keep CRLF.
+- Do NOT commit, push, or run builds/smoke. Only write code.
+
+DONE: group box child windows eliminated and parent-drawn control bar in place; report changed line ranges and stop.

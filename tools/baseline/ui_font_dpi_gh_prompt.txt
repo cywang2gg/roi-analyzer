@@ -1,0 +1,34 @@
+Implement UI modernization in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, NO // comments, CRLF line endings).
+
+READ FIRST:
+- docs/ui_font_dpi_architecture.md -- the v1.2 spec (reviewed twice by agy, GO). Implement sections 2 (P1-a, P1-b, P1-c) and 6 EXACTLY.
+- src/main.c -- WM_CREATE ~2174-2252, WM_DRAWITEM ~2259, Layout() ~1010/2251, Compare_Init call ~2604, WinMain post-message-loop ~2731
+- src/histpanel.c -- hist_panel_t ~15-48, update_layout ~71-97, paint_stats ~360-420 (hardcoded line_height=16 at ~364), WM_PAINT ~619-671
+- src/app.manifest
+
+COMMIT A (font unification: P1-a + P1-c) -- edit main.c + histpanel.c ONLY:
+1. main.c: add file-scope `static HFONT s_ui_font;` (near g_accelerators).
+2. main.c: add `create_ui_font()` returning CreateFontIndirectA with LOGFONTA: lfHeight = -MulDiv(9, dpi, 72) where dpi = GetDeviceCaps(GetDC(NULL), LOGPIXELSY); lfWeight = FW_NORMAL; lfCharSet = DEFAULT_CHARSET; lfQuality = CLEARTYPE_QUALITY; lstrcpyA(lf.lfFaceName, "Segoe UI").
+3. main.c: add `set_font_proc` callback + `App_SetControlFont(HWND parent, HFONT font)` using EnumChildWindows + SendMessageA(child, WM_SETFONT, font, TRUE).
+4. main.c WinMain: call `s_ui_font = create_ui_font();` BEFORE the existing Compare_Init call (~2604). Pass s_ui_font to Compare_Init instead of GetStockObject(DEFAULT_GUI_FONT).
+5. main.c WM_CREATE: call App_SetControlFont(hwnd, s_ui_font) BEFORE Layout() (~2251).
+6. main.c WM_DRAWITEM (~2259, SB_PART_INDEX owner-draw): save old_font = SelectObject(draw->hDC, s_ui_font ? s_ui_font : GetStockObject(DEFAULT_GUI_FONT)), DrawTextA as before, then SelectObject(draw->hDC, old_font) to restore.
+7. main.c WinMain after the message loop (~2731): if (s_ui_font) DeleteObject(s_ui_font);
+8. histpanel.c: add `HFONT font; int font_height;` to hist_panel_t. Add `case WM_SETFONT:` in HistPanelWndProc: store panel->font = (HFONT)wparam; measure font_height via GetTextMetricsA (tm.tmHeight + 1) selecting the font into a DC; InvalidateRect(hwnd, NULL, FALSE).
+9. histpanel.c: in paint_stats (~364) and update_layout, replace hardcoded 16 with font_height (fallback 16 when 0). In WM_PAINT, select panel->font (fallback DEFAULT_GUI_FONT) into panel->back_dc before drawing text, restore old_font after.
+
+COMMIT B (manifest: P1-b) -- edit app.manifest ONLY:
+Insert before </assembly>:
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+
+HARD BANS:
+- Do NOT touch any file other than main.c, histpanel.c (Commit A) and app.manifest (Commit B).
+- Do NOT use snprintf (use _snprintf + manual NUL); no // comments; no stdbool; no strncpy; no wcscpy_s (ANSI build uses lstrcpyA).
+- Do NOT commit, do NOT push, do NOT verify with builds or smoke runs. Only write code.
+- Keep CRLF in every file.
+
+DONE: Commit A files + Commit B file edited; `git status --short` shows ONLY M src/main.c, M src/histpanel.c, M src/app.manifest (plus pre-existing untracked docs). Report file list and stop.

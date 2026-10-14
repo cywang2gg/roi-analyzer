@@ -1,0 +1,14 @@
+Review task (EVALUATE ONLY - do NOT modify any file).
+
+Read docs/compareformV1V2_architecture_.md section 15 (titled "## 15. V2 控制列群組框標題殘影"). It diagnoses a rendering ghosting bug in the V2 compare window: after maximizing, group box captions show leftover glyph fragments (e.g. "FPan Sync", "AActions", "iAnalyze") plus a leftover gray rectangle in the Pan & Sync group. The section states causes H1/H2/H3 and proposes countermeasures A/B/C/D.
+
+Verify the diagnosis against the actual code in src/compare_v2.c:
+1. F1: does V2WndProc really lack WM_PAINT and WM_ERASEBKGND handlers (so it falls to DefWindowProcA)?
+2. H1: is it correct that a BS_GROUPBOX child window repaints only its border+caption without erasing its own interior? Would MoveWindow(..., TRUE) leave stale caption pixels of the OLD position visible?
+3. H2: with WS_CLIPCHILDREN on the top-level window, does InvalidateRect(hwnd, NULL, TRUE) really exclude child windows? Is that why the previous fix attempt failed?
+4. H3: do checkbox/radio controls inside the group box send WM_CTLCOLORSTATIC/WM_CTLCOLORBTN to the parent V2WndProc? Would lack of handler cause the gray rectangle?
+5. Countermeasures A (RedrawWindow with RDW_ALLCHILDREN), B (WM_CTLCOLOR handlers), C (parent-drawn group boxes), D (WS_EX_COMPOSITED): rank them by effectiveness and risk for THIS codebase. Is A likely sufficient given BS_GROUPBOX transparency? Any better alternative not listed?
+6. Any fact in section 15.2 (F1-F7) that is wrong? Any missing cause?
+7. One detail worth checking: the ghost appears only AFTER maximizing, and zoom box (first drawn, far left) is clean while groups 2-3-4 are dirty. Does the layout math (v2_layout proportional widths) fully explain that asymmetry? Any alternative explanation (e.g. group boxes overlapping each other at old/new positions during resize)?
+
+Output: numbered verdicts (AGREE / DISAGREE / UNCERTAIN + evidence file:line), then a final recommendation on which countermeasure to ship first. Change nothing.

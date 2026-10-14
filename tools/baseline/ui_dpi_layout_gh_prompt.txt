@@ -1,0 +1,48 @@
+Implement full DPI layout scaling in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, NO // comments, CRLF line endings).
+
+CONTEXT: A previous change added Segoe UI font + <dpiAware>true</dpiAware>. Text is now crisp but layout does NOT fit at high DPI (system is 216 dpi = 225%): hardcoded pixel layout constants were not scaled. This task scales every fixed layout constant by dpi/96 while leaving proportional math untouched.
+
+READ FIRST:
+- docs/ui_dpi_layout_architecture.md (v1.2, reviewed twice by agy, GO) - implement sections 2.1-2.6 exactly.
+- src/main.c, src/histpanel.c, src/table.c, src/compare_v1.c, src/compare_v2.c
+
+COMMIT D1 (base) - new file src/ui_scale.h + src/main.c:
+1. Create src/ui_scale.h:
+   #ifndef ROI_UI_SCALE_H
+   #define ROI_UI_SCALE_H
+   int Ui_Dpi(void);
+   int Ui_Scale(int px);
+   #endif
+2. main.c: #include "ui_scale.h" (before the definitions, to avoid -Wmissing-prototypes).
+3. main.c file scope: int g_ui_dpi = 96;  (near s_ui_font)
+4. main.c: define int Ui_Dpi(void){ return g_ui_dpi; } and int Ui_Scale(int px){ return MulDiv(px, g_ui_dpi, 96); }
+5. main.c WinMain: BEFORE create_ui_font(), set g_ui_dpi from GetDeviceCaps(GetDC(NULL), LOGPIXELSY); guard <=0 -> 96.
+6. main.c create_ui_font(): replace its own GetDeviceCaps call with dpi = g_ui_dpi.
+
+COMMIT D2 (main window) - src/main.c only:
+Wrap ALL fixed pixel literals in Layout() (~1045-1105) and App_StatusLayout() (~626) with Ui_Scale(), per doc section 2.1 table, INCLUDING clamp assignment lines:
+- hist_width = Ui_Scale(HISTPANEL_DEF_WIDTH); and clamp assignment hist_width = Ui_Scale(HISTPANEL_MIN_WIDTH); (line ~1065)
+- table_height = Ui_Scale(140); (line ~1082 clamp assignment)
+- width - Ui_Scale(320), width - Ui_Scale(200), available - Ui_Scale(100), table_height < Ui_Scale(140), table_height < Ui_Scale(100)
+- button_height = Ui_Scale(28); tabs_height = Ui_Scale(28); width >= Ui_Scale(520)
+- Export/Clear/Multi SetWindowPos coords (8,2,78,24 / 92,70,24 / 172,100,24) -> Ui_Scale each
+- App_StatusLayout: left=Ui_Scale(220), mode=Ui_Scale(200), index=Ui_Scale(90), time=Ui_Scale(260), and the four minimum_* -> Ui_Scale
+Do NOT scale proportional math: table_height=(int)(client.bottom*0.30), width/4 etc.
+Add to MainWndProc: case WM_GETMINMAXINFO: MINMAXINFO *limits=lparam; ptMinTrackSize.x=Ui_Scale(640); ptMinTrackSize.y=Ui_Scale(480); return 0;
+
+COMMIT D3 (histogram + table) - src/histpanel.c + src/table.c:
+histpanel.c update_layout() (~71-97): wrap 8,3,100,220,82,4,74,22,52,36,10,20,4 in Ui_Scale (see doc 2.2 table). BOTH line_height fallbacks (line ~77 in update_layout AND line ~367 in paint_stats) -> Ui_Scale(16). combo threshold width > Ui_Scale(160) ? width - Ui_Scale(100) : Ui_Scale(60).
+histpanel.c WM_PAINT text (~660-672): TextOutA(back_dc, Ui_Scale(8), Ui_Scale(32), source_prefix,...); label x = Ui_Scale(8) + measured width of source_prefix (GetTextExtentPoint32A on back_dc) + Ui_Scale(6), y = Ui_Scale(32) for both label and "No image".
+table.c: col.cx = Ui_Scale(g_widths[i]);  (keep g_widths[] as 96dpi base values)
+
+COMMIT D4 (compare windows) - src/compare_v1.c + src/compare_v2.c:
+compare_v1.c: V1_TOOLBAR_H (40) -> Ui_Scale in WM_SIZE (~1184/1188) and WM_CREATE (~1154). Toolbar button create coords (7,7,67,24 / 77,7,45,24 / 126,7,82,24 / 212,7,62,24 / 278,7,70,24 / 352,7,66,24 / 424,7,94,24 / 522,7,86,24 / 614,9,440,22) -> Ui_Scale each. v1_layout: band=Ui_Scale(23), close_rect 5/20 -> Ui_Scale. v1_render (~457-458): text_rect.left += Ui_Scale(5); text_rect.right -= Ui_Scale(25). Add WM_GETMINMAXINFO to V1WndProc (top-level, NOT V1GridProc): ptMinTrackSize.x=Ui_Scale(720); ptMinTrackSize.y=Ui_Scale(400);
+compare_v2.c: V2_TOP_H/V2_GROUP_H/V2_BOTTOM_H -> Ui_Scale at use sites. v2_layout: wrap gz=4, +4,+8,+6,+12,+18, 20,42,44,45,32,24,22,18,130,70,78, track_w-45-10, <80 with Ui_Scale; pan_right offset gx1+Ui_Scale(82); group boxes y 2 -> Ui_Scale(2). v2_render (~620-645): non-snapshot A/B labels 8/32 -> Ui_Scale; snapshot logical rects too. v2_render split line (~567): non-snapshot line_width = Ui_Scale(2). WM_GETMINMAXINFO: ptMinTrackSize.x=Ui_Scale(900); ptMinTrackSize.y=Ui_Scale(420).
+
+HARD BANS:
+- Only touch: src/ui_scale.h (new), src/main.c, src/histpanel.c, src/table.c, src/compare_v1.c, src/compare_v2.c. Do NOT touch compare_core.c, compare_snap.c, histogram.c, app.manifest.
+- Do NOT scale proportional expressions (width/2, usable*2/5, client.bottom*0.30, split_fraction).
+- Do NOT use snprintf (use _snprintf); no // comments; no stdbool; no strncpy.
+- Do NOT commit, push, or run builds/smoke. Only write code. Keep CRLF.
+
+DONE: all 4 commits' files edited; report file list and stop.

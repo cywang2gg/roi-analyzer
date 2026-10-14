@@ -1,0 +1,16 @@
+Review task (EVALUATE ONLY - do NOT modify any file).
+
+CONTEXT: roi-analyzer (C:/Github/roi-analyzer, pure C + Win32 + GDI, MinGW, ANSI). Read docs/compareformV1V2_architecture_.md section 15 (V2 compare window group-box caption ghosting) including 15.6 (a previous reviewer's verdict) and the new "A failed" evidence in the section header. Then read src/compare_v2.c.
+
+SYMPTOM: V2 window (class V2_CLASS, WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN, class background COLOR_BTNFACE+1, NO WM_PAINT/WM_ERASEBKGND in V2WndProc -> DefWindowProc). Control bar has 4 BS_GROUPBOX children (grp[0..3], no WS_CLIPSIBLINGS) and sibling controls (labels/tracks/buttons, parent=hwnd). After MAXIMIZE: captions show stale glyph fragments ("FPan Sync","AActions","iAnalyze") plus a gray patch in Pan&Sync group. Non-maximized: clean. V1 window has no group boxes: clean.
+
+COUNTERMEASURE A FAILED: WM_SIZE now calls RedrawWindow(hwnd,NULL,NULL, RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN) (replacing InvalidateRect). User hand-test: ghosting PERSISTS, and NEW key evidence - clicking the window (active/inactive toggle) reveals TWO superimposed layers, i.e. activation-driven repaint changes what is visible; the stale layer survives a child-inclusive invalidate+erase.
+
+QUESTIONS:
+1. Why did A fail? Explain precisely which layer the stale pixels live on, given WS_CLIPCHILDREN excludes child rects from parent painting, BS_GROUPBOX interiors are not erased by the group box itself (BUTTON class hbrBackground NULL -> WM_ERASEBKGND no-op), and activation repaint differences. Is the two-layer evidence consistent with stale pixels on the PARENT layer UNDERNEATH the group box rect (never repainted because CLIPCHILDREN excludes it), with the group box caption drawn ON TOP?
+2. Note v2_layout moves group boxes with MoveWindow(...,TRUE) BEFORE RedrawWindow - could ordering between child MoveWindow repaints and the subsequent RedrawWindow leave fragments? Should the fix instead invalidate/erase the parent BEFORE moving children, or use SetWindowPos with SWP_NOREDRAW then one RedrawWindow at the end?
+3. Which countermeasure should ship now? Evaluate: (a) C - remove the 4 BS_GROUPBOX child HWNDs, parent WM_PAINT draws frames/captions via DrawFrameControl+DrawText (controls remain children on top); (b) add WS_CLIPSIBLINGS to group boxes; (c) hide/show children around layout; (d) Remove WS_CLIPCHILDREN from top-level; (e) parent WM_ERASEBKGND handler that fills whole client (defeating CLIPCHILDREN?); (f) other. Rank by effectiveness/risk for this codebase, give the ONE to ship first and exact implementation notes (file, function, style constraints: no // comments, _snprintf, CRLF, -Wall -Wextra).
+4. Does the gray patch need a separate fix or will it disappear with the group box fix?
+5. Any regression risk to snapshot path (compare_snap.c renders v2_render separately) or to DPI scaling (Ui_Scale)?
+
+OUTPUT: numbered answers with file:line evidence, final single recommendation + implementation sketch. Change nothing.

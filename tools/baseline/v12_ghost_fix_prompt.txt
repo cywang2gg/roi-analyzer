@@ -1,0 +1,17 @@
+Fix V1/V2 top-level window ghosting on maximize/resize in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, NO // comments, CRLF line endings).
+
+SYMPTOM: When the compare V2 window is MAXIMIZED, the control bar shows ghost/double-drawn text and white blocks between the group boxes ("FPan Sync", "AActions", "/ iAnalyze", doubled radio circles, white strips). Non-maximized looks fine. Cause: the top-level window's WM_SIZE handler runs the layout (which uses proportional math to move the group boxes to new positions) and returns 0 WITHOUT invalidating the top-level client area, so the background where the group boxes USED to be is never repainted (leftover pixels from the previous position). WM_ERASEBKGND returns 1 without painting, and the system's default invalidation is swallowed because WM_SIZE does not fall through to DefWindowProc.
+
+READ: src/compare_v1.c (top-level V1WndProc WM_SIZE ~1192), src/compare_v2.c (top-level V2 WM_SIZE ~1190). NOTE: compare_v1.c has TWO WM_SIZE handlers (V1GridProc ~1190 area and V1WndProc) - the fix goes in the TOP-LEVEL V1WndProc WM_SIZE (the one that calls SetWindowPos on state->grid). compare_v2.c also has two (overlay proc ~905 and top-level ~1190) - the fix goes in the TOP-LEVEL V2 WM_SIZE (the one that calls v2_layout/v2_update_status).
+
+IMPLEMENT:
+1. src/compare_v2.c top-level WM_SIZE: add `InvalidateRect(hwnd, NULL, TRUE);` after v2_update_status(state);
+2. src/compare_v1.c top-level V1WndProc WM_SIZE: add `InvalidateRect(hwnd, NULL, TRUE);` after the SetWindowPos(state->grid, ...) block (inside the `if (state)`).
+Do NOT change the overlay/grid child WM_SIZE handlers. Do NOT change anything else.
+
+HARD BANS:
+- Only touch src/compare_v1.c and src/compare_v2.c.
+- No // comments; no snprintf; declarations at block top.
+- Do NOT commit, push, or run builds/smoke. Only write code. Keep CRLF.
+
+DONE: two WM_SIZE handlers patched; report the changed line numbers and stop.

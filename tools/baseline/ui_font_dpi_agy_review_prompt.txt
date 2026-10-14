@@ -1,0 +1,18 @@
+Review the UI modernization architecture doc for a pure C Win32 GDI app (roi-analyzer, C:/Github/roi-analyzer).
+
+READ:
+1. docs/ui_font_dpi_architecture.md (the doc under review)
+2. src/app.manifest (verify RC1 claim: no dpiAware)
+3. src/main.c around line 2178 (status bar creation) and 2604 (Compare_Init call) - verify RC2 claim: no WM_SETFONT in main.c
+4. src/compare_core.c:42 (Compare_Font fallback)
+5. src/compare_snap.c:60-75 (CmpSnap_CreateScaledFont)
+
+VERIFY against real code, then answer:
+1. Is RC1 correct (manifest has no dpiAware)? Is the proposed System-DPI-aware manifest XML correct for MinGW rc.exe (windres) embedding?
+2. Is RC2 correct (main.c never sets WM_SETFONT)? Any control the EnumChildWindows approach would MISS that matters (e.g. controls created later, the histogram panel children, ListView header)?
+3. Font creation snippet: any bug in the LOGFONTW usage for ANSI-build project (lstrcpy of face name, charset, negative lfHeight)?
+4. Lifecycle: is DeleteObject(ui_font) in WM_DESTROY after Compare_CloseAll() safe? Any window that could still reference the font at that point (child windows destroyed by then)?
+5. Manifest change: does adding <application><windowsSettings> require any change to how app.rc embeds it (1 RT_MANIFEST)? Will windres accept the extra section?
+6. Anything in the doc that conflicts with existing code (status bar SB_SETFONT vs WM_SETFONT, compare module sharing the HFONT, Snapshot scaled font path)?
+
+OUTPUT: verdict table (item / verdict / evidence file:line / fix if needed). Max 2 review rounds - this is round 1. Do NOT modify any file. This is an evaluate-only task: change nothing, report only.

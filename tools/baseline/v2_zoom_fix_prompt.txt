@@ -1,0 +1,27 @@
+Fix V2 Zoom group geometry imbalance in C:/Github/roi-analyzer (pure C + Win32 + GDI, ANSI A APIs, C11, -Wall -Wextra zero warnings, declarations at block top, NO // comments, CRLF line endings).
+
+READ FIRST: src/compare_v2.c (v2_layout ~790-830, WM_CREATE ~1045-1074, V2_TOP_H/V2_GROUP_H defines ~13-15).
+
+ROOT CAUSE (verified): D4 scaled each literal independently, but the Zoom label width (32px @96dpi) was designed for "L: 100%" (6 chars). At 225% + Segoe UI the label shows up to "L: 800%" (7 chars, ~110px) and overflows: label text is clipped, trackbar starts on top of the label text, tracks hit the groupbox edge, and the two tracks + caption overflow V2_GROUP_H. This is container-vs-content imbalance, not a missed Ui_Scale.
+
+IMPLEMENT (src/compare_v2.c ONLY):
+1. Change #define V2_GROUP_H from 64 to 68 (96dpi base; all use sites already wrap Ui_Scale).
+2. In v2_layout, replace the Zoom label/track block with content-driven geometry:
+   label_w = Ui_Scale(64);
+   track_x = gz + Ui_Scale(8) + label_w + Ui_Scale(6);
+   track_w = zoom_w - (track_x - gz) - Ui_Scale(10);
+   if (track_w < Ui_Scale(80)) track_w = Ui_Scale(80);
+   MoveWindow(state->label[0], gz + Ui_Scale(8), Ui_Scale(20), label_w, Ui_Scale(22), TRUE);
+   MoveWindow(state->track[0], track_x, Ui_Scale(18), track_w, Ui_Scale(24), TRUE);
+   MoveWindow(state->label[1], gz + Ui_Scale(8), Ui_Scale(46), label_w, Ui_Scale(22), TRUE);
+   MoveWindow(state->track[1], track_x, Ui_Scale(44), track_w, Ui_Scale(24), TRUE);
+   (label[1]/track[1] y: 44->46 / 42->44 to clear the caption; keep all other controls untouched.)
+3. In WM_CREATE, update the initial create coords for label[0/1] and track[0/1] to match (label width 64, track x = 8+64+6 = 78, y 20/18/46/44, all wrapped in Ui_Scale as now).
+4. Do NOT touch overlay/status/group positions, WM_GETMINMAXINFO, v2_render, or any other file.
+
+HARD BANS:
+- Only touch src/compare_v2.c. Do NOT touch anything else.
+- No // comments; no snprintf (use _snprintf); declarations at block top.
+- Do NOT commit, push, or run builds/smoke. Only write code. Keep CRLF.
+
+DONE: compare_v2.c Zoom block rewritten; report the changed line range and stop.
