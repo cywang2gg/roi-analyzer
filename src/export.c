@@ -8,7 +8,7 @@
 
 static const unsigned char k_utf16le_bom[] = { 0xFF, 0xFE };
 static const char k_column_header[] =
-    "id\tRm\tRs\tGm\tGs\tBm\tBs\tYm\tYs\tL\ta\tb\trect\tcount\r\n";
+    "id\tRm\tRs\tGm\tGs\tBm\tBs\tYm\tYs\tL\ta\tb\tc\th\trect\tcount\r\n";
 
 static const char *mode_suffix(roi_mode_t mode)
 {
@@ -187,14 +187,15 @@ int Export_Log(const image_t *img, const roi_list_t *rois,
             number++;
             r = &rois->items[i].res;
             written = _snprintf(line, sizeof(line),
-                                "%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t(%d,%d)-(%d,%d)\t%d\r\n",
+                                "%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t(%d,%d)-(%d,%d)\t%d\r\n",
                                 number,
                                 clean_zero(r->r_mean), clean_zero(r->r_std),
                                 clean_zero(r->g_mean), clean_zero(r->g_std),
                                 clean_zero(r->b_mean), clean_zero(r->b_std),
                                 clean_zero(r->y_mean), clean_zero(r->y_std),
                                 clean_zero(r->lab_l), clean_zero(r->lab_a),
-                                clean_zero(r->lab_b),
+                                clean_zero(r->lab_b), clean_zero(r->lab_c),
+                                clean_zero(r->lab_h),
                                 (int)r->x0, (int)r->y0,
                                 (int)r->x1, (int)r->y1, r->count);
             line[sizeof(line) - 1] = '\0';

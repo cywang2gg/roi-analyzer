@@ -13,6 +13,7 @@ typedef struct {
     double r_mean, r_std, g_mean, g_std, b_mean, b_std; // blue = b_*
     double y_mean, y_std;                               // BT.601 luma
     double lab_l, lab_a, lab_b;                         // from mean RGB, D65
+    double lab_c, lab_h;
 } roi_result_t;
 
 // Single pass: sum + sumsq -> mean, population std. rect clamped + ordered.

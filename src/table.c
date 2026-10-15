@@ -7,19 +7,21 @@
 
 static const char *const g_headers[] = {
     "#", "Rect", "Count", "R mean", "R std", "G mean", "G std",
-    "B mean", "B std", "Y mean", "Y std", "L", "a", "b"
+    "B mean", "B std", "Y mean", "Y std", "L", "a", "b", "c", "h"
 };
 
 static const int g_widths[] = {
-    38, 150, 65, 75, 70, 75, 70, 75, 70, 75, 70, 70, 70, 70
+    38, 150, 65, 75, 70, 75, 70, 75, 70, 75, 70, 70, 70, 70, 70, 70
 };
 
 static void report_create_failure(const char *control)
 {
     char message[160];
     DWORD error = GetLastError();
-    snprintf(message, sizeof(message), "Create %s failed (GetLastError=%lu).",
-             control, (unsigned long)error);
+    _snprintf(message, sizeof(message),
+              "Create %s failed (GetLastError=%lu).",
+              control, (unsigned long)error);
+    message[sizeof(message) - 1] = '\0';
     MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
 }
 
@@ -49,9 +51,10 @@ HWND Table_Create(HWND parent, HINSTANCE instance, int control_id)
         if (ListView_InsertColumn(hwnd, i, &col) == -1) {
             DWORD error = GetLastError();
             char message[160];
-            snprintf(message, sizeof(message),
-                     "Could not initialize ListView columns (GetLastError=%lu).",
-                     (unsigned long)error);
+            _snprintf(message, sizeof(message),
+                      "Could not initialize ListView columns (GetLastError=%lu).",
+                      (unsigned long)error);
+            message[sizeof(message) - 1] = '\0';
             MessageBoxA(NULL, message, "ROI Analyzer", MB_OK | MB_ICONERROR);
             DestroyWindow(hwnd);
             return NULL;
@@ -64,7 +67,7 @@ static BOOL append_row(HWND hwnd, int row_index, int global_index,
                        int source_index, const roi_item_t *item,
                        BOOL analysis_pending)
 {
-    char values[14][64];
+    char values[16][64];
     LVITEMA row;
     const roi_result_t *r;
     int i;
@@ -77,7 +80,7 @@ static BOOL append_row(HWND hwnd, int row_index, int global_index,
               (int)item->rc.left, (int)item->rc.top,
               (int)item->rc.right, (int)item->rc.bottom);
     if (analysis_pending) {
-        for (i = 2; i < 14; i++)
+        for (i = 2; i < 16; i++)
             strcpy(values[i], "-");
     } else {
         _snprintf(values[2], sizeof(values[2]), "%d", r->count);
@@ -92,8 +95,10 @@ static BOOL append_row(HWND hwnd, int row_index, int global_index,
         _snprintf(values[11], sizeof(values[11]), "%.2f", r->lab_l);
         _snprintf(values[12], sizeof(values[12]), "%.2f", r->lab_a);
         _snprintf(values[13], sizeof(values[13]), "%.2f", r->lab_b);
+        _snprintf(values[14], sizeof(values[14]), "%.2f", r->lab_c);
+        _snprintf(values[15], sizeof(values[15]), "%.2f", r->lab_h);
     }
-    for (i = 0; i < 14; i++)
+    for (i = 0; i < 16; i++)
         values[i][sizeof(values[i]) - 1] = '\0';
     ZeroMemory(&row, sizeof(row));
     row.mask = LVIF_TEXT | LVIF_PARAM;
@@ -102,7 +107,7 @@ static BOOL append_row(HWND hwnd, int row_index, int global_index,
     row.pszText = values[0];
     if (ListView_InsertItem(hwnd, &row) == -1)
         return FALSE;
-    for (i = 1; i < 14; i++)
+    for (i = 1; i < 16; i++)
         ListView_SetItemText(hwnd, row_index, i, values[i]);
     return TRUE;
 }

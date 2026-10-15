@@ -88,6 +88,11 @@
 #define IDC_PROMPT_BTN_COMPARE_NOW 226
 #define IDD_RENAME_INPUT 230
 #define IDC_RENAME_EDIT 231
+#define IDD_REPLACE_OR_COMPARE 250
+#define IDC_ROC_TEXT 251
+#define IDC_ROC_REPLACE 252
+#define IDC_ROC_COMPARE 253
+#define IDC_ROC_CANCEL 254
 #define SB_PART_POS    0
 #define SB_PART_MSG    1
 #define SB_PART_MODE   2
@@ -1210,8 +1215,6 @@ static BOOL App_CompareOpenPaths(char paths[CMP_MAX_CELLS][MAX_PATH],
     HCURSOR old_cursor;
     BOOL opened = FALSE;
 
-    if (!App_ConfirmDiscard())
-        return FALSE;
     if (!paths || path_count <= 0)
         return FALSE;
     App_FlushPending();
@@ -1302,16 +1305,51 @@ static BOOL App_CompareOpenPaths(char paths[CMP_MAX_CELLS][MAX_PATH],
     return opened;
 }
 
+typedef struct {
+    char path[MAX_PATH];
+} drop_choice_t;
+
+static INT_PTR CALLBACK replace_or_compare_proc(HWND dialog, UINT message,
+                                                WPARAM wparam, LPARAM lparam)
+{
+    drop_choice_t *choice =
+        (drop_choice_t *)GetWindowLongPtrA(dialog, GWLP_USERDATA);
+
+    if (message == WM_INITDIALOG) {
+        char text[MAX_PATH + 16];
+        const char *base;
+
+        choice = (drop_choice_t *)lparam;
+        SetWindowLongPtrA(dialog, GWLP_USERDATA, (LONG_PTR)choice);
+        base = PathFindFileNameA(choice->path);
+        if (!base)
+            base = choice->path;
+        _snprintf(text, sizeof(text), "Drop: %s", base);
+        text[sizeof(text) - 1] = '\0';
+        SetDlgItemTextA(dialog, IDC_ROC_TEXT, text);
+        return TRUE;
+    }
+    if (message == WM_COMMAND) {
+        int id = LOWORD(wparam);
+
+        if (id == IDC_ROC_REPLACE || id == IDC_ROC_COMPARE)
+            EndDialog(dialog, id);
+        else if (id == IDC_ROC_CANCEL || id == IDCANCEL)
+            EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    if (message == WM_CLOSE) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static void App_OnDropFiles(HDROP drop)
 {
     char paths[CMP_MAX_CELLS][MAX_PATH];
     cmp_drop_stats_t stats;
-    BOOL include_current = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     BOOL collected;
-    if (!App_ConfirmDiscard()) {
-        DragFinish(drop);
-        return;
-    }
     ZeroMemory(paths, sizeof(paths));
     collected = CmpDrop_Collect(drop, paths, CMP_MAX_CELLS, &stats);
     DragFinish(drop);
@@ -1323,15 +1361,48 @@ static void App_OnDropFiles(HDROP drop)
                     MB_ICONERROR : MB_ICONINFORMATION));
         return;
     }
-    App_CompareOpenPaths(paths, (int)stats.collected,
-        include_current ? CMP_OPEN_WITH_CURRENT : CMP_OPEN_MAIN_FIRST);
-    if (!include_current && stats.collected >= 1) {
-        char status[sizeof(g_nav_status)];
-        lstrcpynA(status, g_nav_status, (int)sizeof(status));
-        _snprintf(g_nav_status, sizeof(g_nav_status),
-                  "%s; Ctrl+drop to include current image", status);
-        g_nav_status[sizeof(g_nav_status) - 1] = '\0';
-        App_UpdateStatus();
+    if (stats.collected > 0) {
+        if (!g_app.img.valid) {
+            App_CompareOpenPaths(paths, (int)stats.collected,
+                                 CMP_OPEN_MAIN_FIRST);
+        } else if (stats.collected == 1) {
+            drop_choice_t choice;
+            int action;
+
+            lstrcpynA(choice.path, paths[0], MAX_PATH);
+            action = (int)DialogBoxParamA(
+                GetModuleHandleA(NULL),
+                MAKEINTRESOURCEA(IDD_REPLACE_OR_COMPARE),
+                g_app.hwnd_main, replace_or_compare_proc, (LPARAM)&choice);
+            if (action == IDC_ROC_REPLACE) {
+                OpenImageFile(paths[0]);
+            } else if (action == IDC_ROC_COMPARE) {
+                cmp_image_t *a, *b;
+
+                if (!Compare_CanOpen(2)) {
+                    MessageBoxA(g_app.hwnd_main,
+                                "The comparison image limit (8) is reached.",
+                                "Compare Files", MB_OK | MB_ICONWARNING);
+                } else {
+                    a = CmpImage_FromImage(&g_app.img);
+                    b = a ? CmpImage_Load(paths[0]) : NULL;
+                    if (!a || !b) {
+                        MessageBoxA(g_app.hwnd_main,
+                                    "Could not load images for comparison.",
+                                    "Compare Files", MB_OK | MB_ICONERROR);
+                    } else if (!CompareV2_OpenMode(a, b, CMP_ANA_NONE)) {
+                        MessageBoxA(g_app.hwnd_main,
+                                    "Could not create the comparison window.",
+                                    "Compare Files", MB_OK | MB_ICONERROR);
+                    }
+                    CmpImage_Unref(a);
+                    CmpImage_Unref(b);
+                }
+            }
+        } else {
+            App_CompareOpenPaths(paths, (int)stats.collected,
+                                 CMP_OPEN_WITH_CURRENT);
+        }
     }
     if (stats.directories || stats.unsupported || stats.non_acp ||
         stats.duplicates || stats.truncated) {

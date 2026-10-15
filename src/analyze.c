@@ -177,4 +177,8 @@ void AnalyzeROI(const image_t *img, RECT rc, roi_result_t *out)
     out->lab_l = (double)fl;
     out->lab_a = (double)fa;
     out->lab_b = (double)fb;
+    out->lab_c = (double)sqrtf(fa * fa + fb * fb);
+    out->lab_h = (double)(atan2f(fb, fa) * (180.0f / 3.14159265f));
+    if (out->lab_h < 0.0)
+        out->lab_h += 360.0;
 }
