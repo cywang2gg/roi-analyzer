@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,6 +22,7 @@ struct yolo_ort_session {
     OrtRunOptions *active_run_options;
     CRITICAL_SECTION run_options_lock;
     int lock_initialized;
+    int output_channels;
 };
 
 static void yolo_ort_copy_error(char *error, size_t capacity,
@@ -57,8 +59,6 @@ static int yolo_ort_validate_tensor(yolo_ort_session_t *session,
     size_t dimension_count = 0;
     int64_t dimensions[4];
     const int64_t expected_input[4] = { 1, 3, 640, 640 };
-    const int64_t expected_output[3] = { 1, 6, 8400 };
-    const int64_t *expected = is_input ? expected_input : expected_output;
     const size_t expected_count = is_input ? 4U : 3U;
     size_t i;
 
@@ -101,16 +101,31 @@ static int yolo_ort_validate_tensor(yolo_ort_session_t *session,
         session->api->ReleaseTypeInfo(type_info);
         return -1;
     }
-    for (i = 0; i < expected_count; ++i) {
-        if (dimensions[i] != expected[i]) {
-            yolo_ort_copy_error(error, capacity,
-                                "Model tensor shape is unsupported");
-            session->api->ReleaseTypeInfo(type_info);
-            return -1;
+    if (is_input) {
+        for (i = 0; i < expected_count; ++i) {
+            if (dimensions[i] != expected_input[i]) {
+                yolo_ort_copy_error(error, capacity,
+                                    "Model tensor shape is unsupported");
+                session->api->ReleaseTypeInfo(type_info);
+                return -1;
+            }
         }
+    } else if (dimensions[0] != 1 || dimensions[1] < 5 ||
+               dimensions[1] > INT_MAX || dimensions[2] != 8400) {
+        yolo_ort_copy_error(error, capacity,
+                            "Model tensor shape is unsupported");
+        session->api->ReleaseTypeInfo(type_info);
+        return -1;
+    } else {
+        session->output_channels = (int)dimensions[1];
     }
     session->api->ReleaseTypeInfo(type_info);
     return 0;
+}
+
+int yolo_ort_get_output_channels(const yolo_ort_session_t *session)
+{
+    return session != NULL ? session->output_channels : 0;
 }
 
 static void yolo_ort_release_partial(yolo_ort_session_t *session)

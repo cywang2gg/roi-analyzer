@@ -173,6 +173,8 @@ static detect_result_t *process_job(detect_job_t *job, float *input)
     const float *output = NULL;
     LARGE_INTEGER started = { 0 }, finished = { 0 };
     size_t detection_count = 0;
+    size_t pvt_count = 0;
+    int channels;
     int run_status;
     char error[128] = "";
 
@@ -210,15 +212,26 @@ static detect_result_t *process_job(detect_job_t *job, float *input)
         return NULL;
     }
     result->seq = job->seq;
-    if (yolo_decode_v8(output, &job->transform, YOLO_DEFAULT_CONFIDENCE,
-                       YOLO_DEFAULT_IOU, DETECT_MAX_RESULTS,
-                       result->detections, DETECT_MAX_RESULTS,
-                       &detection_count) != 0) {
+    channels = yolo_ort_get_output_channels(g_session);
+    if (yolo_decode_v8_ex(output, channels, 1, &job->transform,
+                          YOLO_DEFAULT_CONFIDENCE, YOLO_DEFAULT_IOU,
+                          DETECT_MAX_RESULTS, result->detections,
+                          DETECT_MAX_RESULTS, &detection_count) != 0) {
         result->status = -1;
         copy_error(result->error, sizeof(result->error),
                    "Could not decode model output");
     } else {
         result->count = detection_count;
+        if (channels >= 8 &&
+            yolo_decode_v8_ex(output, channels, 3, &job->transform,
+                              YOLO_DEFAULT_CONFIDENCE, YOLO_DEFAULT_IOU, 4,
+                              result->pvt_detections, 4, &pvt_count) != 0) {
+            result->status = -1;
+            copy_error(result->error, sizeof(result->error),
+                       "Could not decode PVT model output");
+        } else {
+            result->pvt_count = pvt_count;
+        }
     }
     if (cancelled(job->seq)) {
         free(result);

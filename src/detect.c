@@ -8,6 +8,7 @@
 #include "app_messages.h"
 #include "cc_cv.h"
 #include "detect_worker.h"
+#include "export.h"
 #include "yolo_post.h"
 
 static detect_state_t g_state = DETECT_DISABLED;
@@ -15,6 +16,8 @@ static volatile LONG g_image_seq;
 static LONG g_pending_seq;
 static yolo_detection_t g_results[DETECT_MAX_RESULTS];
 static size_t g_result_count;
+static yolo_detection_t g_pvt_detections[4];
+static size_t g_pvt_detection_count;
 static double g_elapsed_ms;
 static char g_error[128];
 static int g_locate_state;
@@ -41,8 +44,120 @@ static void clear_results(void)
 {
     memset(g_results, 0, sizeof(g_results));
     g_result_count = 0;
+    memset(g_pvt_detections, 0, sizeof(g_pvt_detections));
+    g_pvt_detection_count = 0;
+    memset(g_app.pvt_targets, 0, sizeof(g_app.pvt_targets));
+    g_app.pvt_target_count = 0;
     g_elapsed_ms = 0.0;
     g_error[0] = '\0';
+}
+
+static void pvt_sort_spatial(pvt_target_t *targets, size_t count)
+{
+    size_t i;
+    size_t split = 0;
+    float largest_gap = -1.0f;
+    float second_largest_gap = -1.0f;
+    float min_x = 0.0f;
+    float max_x = 0.0f;
+    size_t row_start;
+
+    if (count == 0)
+        return;
+    min_x = targets[0].cx;
+    max_x = targets[0].cx;
+    for (i = 0; i < count; ++i) {
+        if (targets[i].cx < min_x)
+            min_x = targets[i].cx;
+        if (targets[i].cx > max_x)
+            max_x = targets[i].cx;
+    }
+    for (i = 0; i < count; ++i) {
+        size_t j;
+        for (j = i + 1; j < count; ++j) {
+            if (targets[j].cy < targets[i].cy) {
+                pvt_target_t temporary = targets[i];
+                targets[i] = targets[j];
+                targets[j] = temporary;
+            }
+        }
+    }
+    for (i = 1; i < count; ++i) {
+        float gap = targets[i].cy - targets[i - 1].cy;
+        if (gap > largest_gap) {
+            second_largest_gap = largest_gap;
+            largest_gap = gap;
+            split = i;
+        } else if (gap > second_largest_gap) {
+            second_largest_gap = gap;
+        }
+    }
+    if (split == 0 ||
+        (largest_gap <= (max_x - min_x) * 0.5f &&
+         largest_gap <= second_largest_gap * 1.5f))
+        split = count;
+    row_start = 0;
+    while (row_start < count) {
+        size_t row_end = row_start < split ? split : count;
+        size_t j;
+        for (i = row_start; i < row_end; ++i) {
+            for (j = i + 1; j < row_end; ++j) {
+                if (targets[j].cx < targets[i].cx) {
+                    pvt_target_t temporary = targets[i];
+                    targets[i] = targets[j];
+                    targets[j] = temporary;
+                }
+            }
+        }
+        row_start = row_end;
+    }
+}
+
+static void locate_pvt_targets(const yolo_detection_t *detections,
+                               size_t count)
+{
+    pvt_target_t located[4];
+    pvt_target_t used[4];
+    pvt_target_t unused[4];
+    size_t used_count = 0;
+    size_t unused_count = 0;
+    size_t i;
+
+    g_app.pvt_target_count = 0;
+    memset(g_app.pvt_targets, 0, sizeof(g_app.pvt_targets));
+    if (detections == NULL || count == 0 || !g_app.img.valid ||
+        g_app.img.px == NULL)
+        return;
+    if (count > 4)
+        count = 4;
+    for (i = 0; i < count; ++i) {
+        pvt_box_t box;
+
+        box.x1 = detections[i].x1;
+        box.y1 = detections[i].y1;
+        box.x2 = detections[i].x2;
+        box.y2 = detections[i].y2;
+        box.score = detections[i].score;
+        box.class_id = detections[i].class_id;
+        (void)Pvt_LocateAndMeasure(g_app.img.px, g_app.img.w, g_app.img.h,
+                                   g_app.img.pitch, &box, &located[i]);
+        if (located[i].used) {
+            used[used_count++] = located[i];
+        } else {
+            located[i].cx = (box.x1 + box.x2) * 0.5f;
+            located[i].cy = (box.y1 + box.y2) * 0.5f;
+            unused[unused_count++] = located[i];
+        }
+    }
+    pvt_sort_spatial(used, used_count);
+    pvt_sort_spatial(unused, unused_count);
+    for (i = 0; i < used_count; ++i)
+        g_app.pvt_targets[g_app.pvt_target_count++] = used[i];
+    for (i = 0; i < unused_count; ++i)
+        g_app.pvt_targets[g_app.pvt_target_count++] = unused[i];
+    if (Export_PvtLog(g_app.img.path, g_app.pvt_targets,
+                      g_app.pvt_target_count) != 0)
+        OutputDebugStringA("ROI Analyzer: could not append PVT CSV log.\n");
 }
 
 static void clear_locate_result(void)
@@ -239,6 +354,7 @@ void Detect_OnInitResult(detect_init_result_t *result)
 void Detect_OnResult(detect_result_t *result)
 {
     LONG seq;
+    size_t pvt_count;
 
     if (result == NULL)
         return;
@@ -253,6 +369,10 @@ void Detect_OnResult(detect_result_t *result)
             DETECT_MAX_RESULTS : result->count;
         memcpy(g_results, result->detections,
                g_result_count * sizeof(*g_results));
+        pvt_count = result->pvt_count > 4 ? 4 : result->pvt_count;
+        memcpy(g_pvt_detections, result->pvt_detections,
+               pvt_count * sizeof(*g_pvt_detections));
+        g_pvt_detection_count = pvt_count;
         g_elapsed_ms = result->elapsed_ms;
         g_state = DETECT_DONE;
     } else {
@@ -263,6 +383,9 @@ void Detect_OnResult(detect_result_t *result)
         g_elapsed_ms = result->elapsed_ms;
         g_state = DETECT_FAILED;
     }
+    if (result->status == 0 && g_pvt_detection_count > 0 &&
+        g_app.img.valid && g_app.img.px != NULL)
+        locate_pvt_targets(g_pvt_detections, g_pvt_detection_count);
     if (result->status == 0 && g_result_count > 0U)
         submit_locate(&g_results[0], seq);
     free(result);
@@ -340,6 +463,20 @@ void Detect_GetStatusText(char *text, size_t capacity)
             (void)snprintf(text, capacity, "Detected %u color chart%s (%.0f ms)",
                            (unsigned)g_result_count,
                            g_result_count == 1 ? "" : "s", g_elapsed_ms);
+        {
+            size_t text_length = strlen(text);
+            size_t located_count = 0;
+            size_t i;
+
+            for (i = 0; i < g_app.pvt_target_count; ++i) {
+                if (g_app.pvt_targets[i].used)
+                    ++located_count;
+            }
+            if (text_length < capacity)
+                (void)snprintf(text + text_length, capacity - text_length,
+                               " | PVT: %u/%u", (unsigned)located_count,
+                               (unsigned)g_pvt_detection_count);
+        }
         break;
     case DETECT_FAILED:
         (void)snprintf(text, capacity, "Color chart detection failed: %s",
@@ -382,6 +519,13 @@ size_t Detect_GetResults(const yolo_detection_t **detections)
     if (detections != NULL)
         *detections = g_results;
     return g_result_count;
+}
+
+size_t Detect_GetPvtResults(const yolo_detection_t **detections)
+{
+    if (detections != NULL)
+        *detections = g_pvt_detections;
+    return g_pvt_detection_count;
 }
 
 void Detect_Shutdown(void)

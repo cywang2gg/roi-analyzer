@@ -9,3 +9,16 @@ bin/onnxruntime.dll
 # cc locate v1.2: exe 同目錄的 OpenCV + msys 執行期 DLL 由 third_party/opencv-4.12 部署取得，不進版控
 # 測試圖副本（正本在 ColorChartv2/CropFullsamples），不進版控
 bin/CropFullsamples/
+# v1.4: 新模型準備暫存區——大型 onnx/pt/權重與驗收原始輸出，不進版控（工具本身進版控）
+__pycache__/
+*.pyc
+models/archives/
+models/*-pvt.*
+testdata/pvt/
+tools/model_inbox/*.onnx
+tools/model_inbox/*.pt
+tools/model_inbox/**/*.onnx
+tools/model_inbox/**/*.pt
+tools/model_inbox/**/*.weights
+tools/model_inbox/**/*.onnx.data
+tools/model_inbox/**/model.onnx

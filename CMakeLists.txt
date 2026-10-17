@@ -40,6 +40,7 @@ add_executable(roi_analyzer
     src/cc_locate.c
     src/yolo_ort.c
     src/yolo_post.c
+    src/pvt_locate.c
 )
 target_compile_options(roi_analyzer PRIVATE "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra>")
 target_include_directories(roi_analyzer PRIVATE src)
@@ -57,6 +58,10 @@ add_executable(test_yolo_post tests/test_yolo_post.c src/yolo_post.c)
 target_compile_options(test_yolo_post PRIVATE -Wall -Wextra -Wno-unused-variable -Wno-unused-but-set-variable)
 target_include_directories(test_yolo_post PRIVATE src)
 target_link_libraries(test_yolo_post m)
+add_executable(test_pvt tests/test_pvt.c src/pvt_locate.c)
+target_compile_options(test_pvt PRIVATE -Wall -Wextra)
+target_include_directories(test_pvt PRIVATE src)
+target_link_libraries(test_pvt m)
 add_executable(test_locate
     tests/test_locate.c
     src/cc_locate.c
@@ -69,4 +74,5 @@ target_include_directories(test_locate SYSTEM PRIVATE C:/msys64/ucrt64/include/o
 target_link_libraries(test_locate windowscodecs ole32 uuid m opencv_core opencv_imgproc)
 enable_testing()
 add_test(NAME test_yolo_post COMMAND test_yolo_post)
+add_test(NAME test_pvt COMMAND test_pvt)
 add_test(NAME test_locate COMMAND test_locate)

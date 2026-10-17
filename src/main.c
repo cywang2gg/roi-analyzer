@@ -444,6 +444,8 @@ static void App_UpdateImageMenu(void)
                    MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu_view, IDM_SHOW_PATCH_GRID, MF_BYCOMMAND |
                   (g_app.show_patch_grid ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_menu_view, IDM_VIEW_SHOW_PVT, MF_BYCOMMAND |
+                  (g_app.show_pvt_targets ? MF_CHECKED : MF_UNCHECKED));
 }
 
 static void App_RotateOrthogonal(int steps)
@@ -2456,6 +2458,14 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wparam,
             if (g_app.hwnd_canvas != NULL)
                 InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
         }
+        else if (id == IDM_VIEW_SHOW_PVT) {
+            g_app.show_pvt_targets = !g_app.show_pvt_targets;
+            CheckMenuItem(g_menu_view, IDM_VIEW_SHOW_PVT,
+                          MF_BYCOMMAND | (g_app.show_pvt_targets ?
+                                          MF_CHECKED : MF_UNCHECKED));
+            if (g_app.hwnd_canvas != NULL)
+                InvalidateRect(g_app.hwnd_canvas, NULL, FALSE);
+        }
         else if (id == IDM_ROT90)
             App_RotateOrthogonal(1);
         else if (id == IDM_ROT180)
@@ -2666,6 +2676,8 @@ static HMENU CreateMainMenu(void)
     AppendMenuA(view, MF_STRING |
                 (g_app.show_patch_grid ? MF_CHECKED : MF_UNCHECKED),
                 IDM_SHOW_PATCH_GRID, "Show Patch Grid");
+    AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_VIEW_SHOW_PVT,
+                "Show PVT &Targets");
     AppendMenuA(view, MF_SEPARATOR, 0, NULL);
     AppendMenuA(view, MF_STRING | MF_CHECKED, IDM_HIST_RGB, "Channel: RGB\tA");
     AppendMenuA(view, MF_STRING, IDM_HIST_Y, "Luminosity (Y)\tY");
@@ -2742,6 +2754,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
     g_app.mode = MODE_DRAG;
     g_app.table_page = MODE_DRAG;
     g_app.show_hist = TRUE;
+    g_app.show_pvt_targets = TRUE;
     (void)Settings_LoadLocateOptions(&locate_options);
     g_app.locate_enabled = locate_options.enabled;
     g_app.show_patch_grid = locate_options.show_grid;

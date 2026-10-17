@@ -20,5 +20,6 @@ int yolo_ort_terminate(yolo_ort_session_t *session, char *error,
 int yolo_ort_run(yolo_ort_session_t *session, const float *input,
                  OrtRunOptions *run_options, const float **output,
                  char *error, size_t error_capacity);
+int yolo_ort_get_output_channels(const yolo_ort_session_t *session);
 
 #endif

@@ -199,6 +199,43 @@ static void test_class_filter(void)
     assert(detections[0].x1 == 90.0f);
 }
 
+static void test_decode_ex_multiclass(void)
+{
+    float output[10U * YOLO_OUTPUT_CANDIDATES];
+    yolo_letterbox_t params;
+    yolo_detection_t detections[2];
+    size_t count;
+    const size_t pvt_index = 4;
+    const size_t chart_index = 5;
+
+    memset(output, 0, sizeof(output));
+    params.image_width = 640;
+    params.image_height = 640;
+    params.resized_width = 640;
+    params.resized_height = 640;
+    params.pad_x = 0;
+    params.pad_y = 0;
+    params.scale = 1.0;
+    output[pvt_index] = 100.0f;
+    output[YOLO_OUTPUT_CANDIDATES + pvt_index] = 120.0f;
+    output[2U * YOLO_OUTPUT_CANDIDATES + pvt_index] = 40.0f;
+    output[3U * YOLO_OUTPUT_CANDIDATES + pvt_index] = 60.0f;
+    output[7U * YOLO_OUTPUT_CANDIDATES + pvt_index] = 0.9f;
+    output[chart_index] = 300.0f;
+    output[YOLO_OUTPUT_CANDIDATES + chart_index] = 320.0f;
+    output[2U * YOLO_OUTPUT_CANDIDATES + chart_index] = 20.0f;
+    output[3U * YOLO_OUTPUT_CANDIDATES + chart_index] = 20.0f;
+    output[5U * YOLO_OUTPUT_CANDIDATES + chart_index] = 0.95f;
+    assert(yolo_decode_v8_ex(output, 10, 3, &params, 0.25f, 0.7f, 4,
+                             detections, 2, &count) == 0);
+    assert(count == 1);
+    assert(detections[0].class_id == 3);
+    assert(detections[0].score == 0.9f);
+    assert(detections[0].x1 == 80.0f);
+    assert(yolo_decode_v8_ex(output, 7, 3, &params, 0.25f, 0.7f, 4,
+                             detections, 2, &count) == -1);
+}
+
 int main(void)
 {
     test_letterbox_parameters();
@@ -210,6 +247,7 @@ int main(void)
     test_nms_nonoverlap_and_classes();
     test_empty_input();
     test_class_filter();
+    test_decode_ex_multiclass();
     (void)puts("test_yolo_post: all tests passed");
     return 0;
 }

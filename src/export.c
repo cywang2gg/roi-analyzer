@@ -211,3 +211,112 @@ int Export_Log(const image_t *img, const roi_list_t *rois,
         error_path[0] = '\0';
     return failed ? -1 : 0;
 }
+
+int Export_PvtLog(const char *image_path, const pvt_target_t *targets,
+                  size_t count)
+{
+    static const char header[] =
+        "id\tcx\tcy\tcontrast_avg\tcontrast_min\tovershoot_avg\t"
+        "overshoot_max\tundershoot_avg\tundershoot_max\treason\r\n";
+    char path[MAX_PATH];
+    char line[512];
+    const char *base;
+    const char *extension;
+    size_t directory_length;
+    size_t base_length;
+    size_t i;
+    int written;
+    int failed = 0;
+    int export_error = 0;
+    FILE *file;
+
+    errno = 0;
+    if (image_path == NULL || image_path[0] == '\0' ||
+        (count != 0 && targets == NULL) || count > 4) {
+        errno = EINVAL;
+        return -1;
+    }
+    base = PathFindFileNameA(image_path);
+    if (base == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    extension = PathFindExtensionA(base);
+    if (extension == NULL || extension == base)
+        extension = base + strlen(base);
+    directory_length = (size_t)(base - image_path);
+    base_length = (size_t)(extension - base);
+    written = _snprintf(path, sizeof(path), "%.*s%.*s_pvt.csv",
+                        (int)directory_length, image_path, (int)base_length,
+                        base);
+    path[sizeof(path) - 1] = '\0';
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        errno = ERANGE;
+        return -1;
+    }
+
+    file = fopen(path, "rb+");
+    if (file == NULL) {
+        export_error = errno;
+        if (export_error != ENOENT) {
+            errno = export_error;
+            return -1;
+        }
+        file = fopen(path, "wb");
+        if (file == NULL) {
+            errno = errno == 0 ? EIO : errno;
+            return -1;
+        }
+        export_error = 0;
+        if (fwrite(k_utf16le_bom, 1, sizeof(k_utf16le_bom), file) !=
+            sizeof(k_utf16le_bom) || write_utf16le(file, header) != 0)
+            failed = 1;
+    } else {
+        unsigned char bom[2];
+        long file_size;
+
+        if (fseek(file, 0, SEEK_END) != 0) {
+            failed = 1;
+        } else {
+            file_size = ftell(file);
+            if (file_size < 2) {
+                export_error = EINVAL;
+                failed = 1;
+            } else if (fseek(file, 0, SEEK_SET) != 0 ||
+                       fread(bom, 1, sizeof(bom), file) != sizeof(bom)) {
+                failed = 1;
+            } else if (bom[0] != k_utf16le_bom[0] ||
+                       bom[1] != k_utf16le_bom[1]) {
+                export_error = EILSEQ;
+                failed = 1;
+            } else if (fseek(file, 0, SEEK_END) != 0) {
+                failed = 1;
+            }
+        }
+    }
+    for (i = 0; i < count && !failed; ++i) {
+        written = _snprintf(line, sizeof(line),
+                            "P%u\t%.2f\t%.2f\t%.4f\t%.4f\t%.2f\t%.2f\t"
+                            "%.2f\t%.2f\t%s\r\n",
+                            (unsigned)(i + 1), (double)targets[i].cx,
+                            (double)targets[i].cy,
+                            (double)targets[i].contrast_avg,
+                            (double)targets[i].contrast_min,
+                            (double)targets[i].overshoot_avg,
+                            (double)targets[i].overshoot_max,
+                            (double)targets[i].undershoot_avg,
+                            (double)targets[i].undershoot_max,
+                            targets[i].reason != NULL ? targets[i].reason :
+                            "OK");
+        line[sizeof(line) - 1] = '\0';
+        if (written < 0 || (size_t)written >= sizeof(line) ||
+            write_utf16le(file, line) != 0)
+            failed = 1;
+    }
+    if (fclose(file) != 0)
+        failed = 1;
+    if (failed && export_error == 0)
+        export_error = errno != 0 ? errno : EIO;
+    errno = export_error;
+    return failed ? -1 : 0;
+}

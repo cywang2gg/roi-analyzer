@@ -1,5 +1,6 @@
 #include "canvas.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <windowsx.h>
@@ -216,6 +217,135 @@ static void cc_overlay_draw(HDC hdc)
         draw_outline(hdc, &window_rect, RGB(0, 255, 255), 1, PS_SOLID);
         draw_label(hdc, window_rect.left + 2, window_rect.top + 2,
                    roi->id, FALSE);
+    }
+}
+
+static void pvt_overlay_draw(HDC hdc)
+{
+    size_t i;
+
+    if (!g_app.img.valid || !g_app.show_pvt_targets ||
+        g_app.pvt_target_count == 0 || g_app.view.scale <= 0.0f)
+        return;
+    for (i = 0; i < g_app.pvt_target_count && i < 4; ++i) {
+        const pvt_target_t *target = &g_app.pvt_targets[i];
+        POINT image_point;
+        POINT window_point;
+        POINT seam_v_start_image;
+        POINT seam_v_end_image;
+        POINT seam_h_start_image;
+        POINT seam_h_end_image;
+        POINT seam_v_start_window;
+        POINT seam_v_end_window;
+        POINT seam_h_start_window;
+        POINT seam_h_end_window;
+        char label[96];
+        HPEN pen;
+        HPEN seam_pen;
+        HGDIOBJ old_pen;
+        HGDIOBJ old_seam_pen;
+        HGDIOBJ old_brush;
+        COLORREF old_text_color;
+        int radius;
+        int half_size;
+        int label_y;
+
+        image_point.x = (LONG)target->cx;
+        image_point.y = (LONG)target->cy;
+        View_ToWindow(&g_app.view, image_point, &window_point);
+        if (target->used) {
+            _snprintf(label, sizeof(label), "P%u c=%.2f o=%.1f%%",
+                      (unsigned)(i + 1), (double)target->contrast_avg,
+                      (double)target->overshoot_avg);
+            label[sizeof(label) - 1] = '\0';
+            pen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
+            half_size = target->lines_valid ? 6 : 20;
+            radius = (int)(target->r_eq * g_app.view.scale + 0.5f);
+        } else {
+            _snprintf(label, sizeof(label), "P%u %s", (unsigned)(i + 1),
+                      target->reason != NULL ? target->reason :
+                      "not_located");
+            label[sizeof(label) - 1] = '\0';
+            pen = CreatePen(PS_SOLID, 1, RGB(255, 255, 0));
+            half_size = 6;
+            radius = 0;
+        }
+        if (pen == NULL)
+            continue;
+
+        /* Draw fitted knife-edge seam boundary lines first */
+        if (target->used && target->lines_valid &&
+            g_app.view.scale > 0.0f && target->r_eq > 0.0f)
+        {
+            double y_start;
+            double y_end;
+            double x_start;
+            double x_end;
+
+            y_start = (double)target->cy - 1.15 * (double)target->r_eq;
+            y_end = (double)target->cy + 1.15 * (double)target->r_eq;
+            x_start = (double)target->cx - 1.15 * (double)target->r_eq;
+            x_end = (double)target->cx + 1.15 * (double)target->r_eq;
+            seam_v_start_image.x = (LONG)floor(
+                (double)target->line_v_slope * y_start +
+                (double)target->line_v_offset + 0.5);
+            seam_v_start_image.y = (LONG)floor(y_start + 0.5);
+            seam_v_end_image.x = (LONG)floor(
+                (double)target->line_v_slope * y_end +
+                (double)target->line_v_offset + 0.5);
+            seam_v_end_image.y = (LONG)floor(y_end + 0.5);
+            seam_h_start_image.x = (LONG)floor(x_start + 0.5);
+            seam_h_start_image.y = (LONG)floor(
+                (double)target->line_h_slope * x_start +
+                (double)target->line_h_offset + 0.5);
+            seam_h_end_image.x = (LONG)floor(x_end + 0.5);
+            seam_h_end_image.y = (LONG)floor(
+                (double)target->line_h_slope * x_end +
+                (double)target->line_h_offset + 0.5);
+            View_ToWindow(&g_app.view, seam_v_start_image,
+                          &seam_v_start_window);
+            View_ToWindow(&g_app.view, seam_v_end_image, &seam_v_end_window);
+            View_ToWindow(&g_app.view, seam_h_start_image,
+                          &seam_h_start_window);
+            View_ToWindow(&g_app.view, seam_h_end_image, &seam_h_end_window);
+            seam_pen = CreatePen(PS_SOLID, 2, RGB(0, 255, 255));
+            if (seam_pen != NULL)
+            {
+                old_seam_pen = SelectObject(hdc, seam_pen);
+                MoveToEx(hdc, seam_v_start_window.x, seam_v_start_window.y,
+                         NULL);
+                LineTo(hdc, seam_v_end_window.x, seam_v_end_window.y);
+                MoveToEx(hdc, seam_h_start_window.x, seam_h_start_window.y,
+                         NULL);
+                LineTo(hdc, seam_h_end_window.x, seam_h_end_window.y);
+                SelectObject(hdc, old_seam_pen);
+                DeleteObject(seam_pen);
+            }
+        }
+
+        /* Draw Phase A refined center marker and radius circle */
+        old_pen = SelectObject(hdc, pen);
+        old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        MoveToEx(hdc, window_point.x - half_size, window_point.y, NULL);
+        LineTo(hdc, window_point.x + half_size + 1, window_point.y);
+        MoveToEx(hdc, window_point.x, window_point.y - half_size, NULL);
+        LineTo(hdc, window_point.x, window_point.y + half_size + 1);
+        if (target->used && radius > 0)
+            Ellipse(hdc, window_point.x - radius, window_point.y - radius,
+                    window_point.x + radius + 1, window_point.y + radius + 1);
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
+        DeleteObject(pen);
+
+        old_text_color = GetTextColor(hdc);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, target->used ? RGB(255, 0, 0) : RGB(255, 255, 0));
+        label_y = window_point.y - half_size - 18;
+        if (label_y < 0)
+            label_y = window_point.y + half_size + 2;
+        TextOutA(hdc, window_point.x - half_size, label_y, label,
+                 (int)strlen(label));
+        SetTextColor(hdc, old_text_color);
     }
 }
 
@@ -532,6 +662,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lp
                 View_DrawImage(mem, &g_app.view, &g_app.img);
             draw_detection_overlay(mem);
             cc_overlay_draw(mem);
+            pvt_overlay_draw(mem);
             draw_roi_overlay(mem);
         }
         BitBlt(hdc, rc.left, rc.top, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);

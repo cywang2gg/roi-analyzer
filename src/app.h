@@ -1,6 +1,7 @@
 #ifndef ROI_APP_H
 #define ROI_APP_H
 
+#include <stddef.h>
 #include <windows.h>
 
 #include "image.h"
@@ -8,11 +9,13 @@
 #include "histpanel.h"
 #include "filelist.h"
 #include "roi.h"
+#include "pvt_locate.h"
 #include "view.h"
 #include "version.h"
 
 #define IDM_COMPARE_FILES 155
 #define IDM_COMPARE_NEXT  156
+#define IDM_VIEW_SHOW_PVT 40045
 
 typedef struct {
     HWND hwnd_main, hwnd_canvas, hwnd_table, hwnd_tabs, hwnd_status, hwnd_hist;
@@ -36,6 +39,9 @@ typedef struct {
     int hist_width;
     BOOL locate_enabled;
     BOOL show_patch_grid;
+    BOOL show_pvt_targets;
+    pvt_target_t pvt_targets[4];
+    size_t pvt_target_count;
     BOOL locate_result_valid;
     cc_locate_result_t locate_result;
     BOOL analysis_stale;

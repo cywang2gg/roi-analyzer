@@ -222,17 +222,21 @@ int yolo_nms(yolo_detection_t *detections, size_t count, float iou_threshold,
     return 0;
 }
 
-int yolo_decode_v8(const float *output, const yolo_letterbox_t *params,
-                   float confidence_threshold, float iou_threshold,
-                   size_t max_det, yolo_detection_t *detections,
-                   size_t capacity, size_t *detection_count)
+int yolo_decode_v8_ex(const float *output, int total_channels,
+                      int target_class_id, const yolo_letterbox_t *params,
+                      float confidence_threshold, float iou_threshold,
+                      size_t max_det, yolo_detection_t *detections,
+                      size_t capacity, size_t *detection_count)
 {
     yolo_detection_t *candidates;
+    size_t score_channel;
     size_t candidate_count = 0;
     size_t kept_count = 0;
     size_t i;
 
     if (output == NULL || params == NULL || detection_count == NULL ||
+        total_channels < 5 || target_class_id < 0 ||
+        target_class_id >= total_channels - 4 ||
         (capacity != 0 && detections == NULL) ||
         !isfinite(confidence_threshold) || confidence_threshold < 0.0f ||
         confidence_threshold > 1.0f || !isfinite(iou_threshold) ||
@@ -247,16 +251,16 @@ int yolo_decode_v8(const float *output, const yolo_letterbox_t *params,
     if (candidates == NULL) {
         return -1;
     }
+    score_channel = (size_t)(4 + target_class_id);
 
     for (i = 0; i < YOLO_OUTPUT_CANDIDATES; ++i) {
-        const float score = output[5U * YOLO_OUTPUT_CANDIDATES + i];
+        const float score =
+            output[score_channel * YOLO_OUTPUT_CANDIDATES + i];
         const float center_x = output[i];
         const float center_y = output[YOLO_OUTPUT_CANDIDATES + i];
         const float width = output[2U * YOLO_OUTPUT_CANDIDATES + i];
         const float height = output[3U * YOLO_OUTPUT_CANDIDATES + i];
 
-        /* Only class 1 (color-chart) is kept; class 0 (122) is discarded.
-           The score stored is always the class-1 score, not the max. */
         if (!isfinite(score) ||
             score < confidence_threshold || !isfinite(center_x) ||
             !isfinite(center_y) || !isfinite(width) || !isfinite(height) ||
@@ -268,7 +272,7 @@ int yolo_decode_v8(const float *output, const yolo_letterbox_t *params,
         candidates[candidate_count].x2 = center_x + width * 0.5f;
         candidates[candidate_count].y2 = center_y + height * 0.5f;
         candidates[candidate_count].score = score;
-        candidates[candidate_count].class_id = 1;
+        candidates[candidate_count].class_id = target_class_id;
         ++candidate_count;
     }
 
@@ -310,4 +314,14 @@ int yolo_decode_v8(const float *output, const yolo_letterbox_t *params,
 
     free(candidates);
     return 0;
+}
+
+int yolo_decode_v8(const float *output, const yolo_letterbox_t *params,
+                   float confidence_threshold, float iou_threshold,
+                   size_t max_det, yolo_detection_t *detections,
+                   size_t capacity, size_t *detection_count)
+{
+    return yolo_decode_v8_ex(output, YOLO_OUTPUT_CHANNELS, 1, params,
+                             confidence_threshold, iou_threshold, max_det,
+                             detections, capacity, detection_count);
 }

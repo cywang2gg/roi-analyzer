@@ -1,0 +1,24 @@
+{
+    "source": "roboflow+colab ultralytics 8.4.178",
+    "source_sha256": "416779f793f09e04f9b48c5f629726122fc810d008acb7994fdc651da9c4b247",
+    "ultralytics_or_producer": "pytorch 2.11.0",
+    "yolo_family": "v8",
+    "task": "detect",
+    "imgsz": 640,
+    "names": [
+        "122",
+        "color-chart",
+        "focus-aid",
+        "pvt-target",
+        "wedgeH",
+        "wedgeV"
+    ],
+    "v1_use_class": 1,
+    "pvt_use_class": 3,
+    "output_shape": [
+        1,
+        10,
+        8400
+    ],
+    "opset": 18
+}

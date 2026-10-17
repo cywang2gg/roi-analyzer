@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include "cc_locate.h"
+#include "pvt_locate.h"
 #include "yolo_post.h"
 
 #define IDT_DETECT_DELAY 2
@@ -26,6 +27,8 @@ typedef struct {
     double elapsed_ms;
     char error[128];
     yolo_detection_t detections[DETECT_MAX_RESULTS];
+    size_t pvt_count;
+    yolo_detection_t pvt_detections[4];
 } detect_result_t;
 
 typedef struct {
@@ -47,6 +50,7 @@ LONG Detect_ImageSeq(void);
 void Detect_GetStatusText(char *text, size_t capacity);
 void Detect_GetLocateStatusText(char *text, size_t capacity);
 size_t Detect_GetResults(const yolo_detection_t **detections);
+size_t Detect_GetPvtResults(const yolo_detection_t **detections);
 void Detect_Shutdown(void);
 
 #endif
